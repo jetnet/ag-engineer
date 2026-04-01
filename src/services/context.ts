@@ -97,13 +97,17 @@ export class ContextService {
 
       this.activeConversationId = cascadeId;
       const stepCount = Number(activeTraj.stepCount || 0);
+      const shortId = cascadeId.substring(0, 8);
 
       // 3. Fetch the last few steps to find the latest RESPONSE with token data
       let tokenInfo: StepTokenInfo | null = null;
       if (stepCount > 0) {
-        // Fetch last 30 steps — should contain at least one RESPONSE
+        // Fetch last 30 steps. Over-request endIndex because stepCount in
+        // the trajectory summary may be stale (not updated during streaming).
         const startIdx = Math.max(0, stepCount - 30);
-        tokenInfo = await this.fetchLatestTokenInfo(connection, cascadeId, startIdx, stepCount);
+        const endIdx = stepCount + 50; // ask for more than stepCount to catch new steps
+        logDebug(`Fetching steps ${startIdx}–${endIdx} for trajectory ${shortId}… (summary stepCount=${stepCount})`);
+        tokenInfo = await this.fetchLatestTokenInfo(connection, cascadeId, startIdx, endIdx);
       }
 
       // 4. Build snapshot
@@ -192,22 +196,44 @@ export class ContextService {
     );
     if (!data?.steps) return null;
 
+    logDebug(`Got ${data.steps.length} steps (requested ${startIndex}–${endIndex})`);
+
+    // Diagnostic: show last 5 steps' types
+    const lastN = Math.min(5, data.steps.length);
+    const typeSummary: string[] = [];
+    for (let j = data.steps.length - lastN; j < data.steps.length; j++) {
+      const s = data.steps[j];
+      typeSummary.push(`${startIndex + j}:${String(s.type || '?')}`);
+    }
+    logDebug(`Last ${lastN} steps: ${typeSummary.join(', ')}`);
+
     // Walk backwards to find the latest RESPONSE step with token data
+    let dumpedMismatch = false;
     for (let i = data.steps.length - 1; i >= 0; i--) {
       const step = data.steps[i];
       const type = String(step.type || '');
       if (!type.includes('RESPONSE')) continue;
 
-      // Search the step for the token data object
+      // Search the step for token data — each field matched independently
+      // because field order varies between API versions.
+      // Support both quoted ("123") and unquoted (123) numeric values.
       const raw = JSON.stringify(step);
-      const match = raw.match(/"inputTokens"\s*:\s*"(\d+)"\s*,\s*"outputTokens"\s*:\s*"(\d+)"/);
-      if (!match) continue;
+      const inputMatch = raw.match(/"inputTokens"\s*:\s*"?(\d+)"?/);
+      const outputMatch = raw.match(/"outputTokens"\s*:\s*"?(\d+)"?/);
+      if (!inputMatch || !outputMatch) {
+        // Dump the FIRST non-matching RESPONSE step to diagnose format
+        if (!dumpedMismatch) {
+          dumpedMismatch = true;
+          const snippet = raw.length > 500 ? raw.substring(0, 500) + '…' : raw;
+          logDebug(`RESPONSE step ${startIndex + i} has no token data: ${snippet}`);
+        }
+        continue;
+      }
 
-      // Extract all token fields
-      const inputTokens = parseInt(match[1], 10);
-      const outputTokens = parseInt(match[2], 10);
+      const inputTokens = parseInt(inputMatch[1], 10);
+      const outputTokens = parseInt(outputMatch[1], 10);
 
-      const cacheMatch = raw.match(/"cacheReadTokens"\s*:\s*"(\d+)"/);
+      const cacheMatch = raw.match(/"cacheReadTokens"\s*:\s*"?(\d+)"?/);
       const cacheReadTokens = cacheMatch ? parseInt(cacheMatch[1], 10) : 0;
 
       const modelMatch = raw.match(/"model"\s*:\s*"([^"]+)"/);
@@ -217,9 +243,9 @@ export class ContextService {
       const apiProvider = providerMatch ? providerMatch[1] : '';
 
       logDebug(
-        `Token data from step ${startIndex + i}: ` +
-        `input=${inputTokens} + cache=${cacheReadTokens} = ${inputTokens + cacheReadTokens} prompt tokens, ` +
-        `output=${outputTokens}, model=${model}, provider=${apiProvider}`,
+        `Step ${startIndex + i}/${data.steps.length}: ` +
+        `input=${inputTokens} + cache=${cacheReadTokens} + out=${outputTokens}, ` +
+        `model=${model}`,
       );
 
       return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider };
