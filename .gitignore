@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Packaged extension
+*.vsix
+
+# Source maps
+*.map
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Research & prompt notes (local only)
+RESEARCH-NOTES-*.md
+PROMPT-*.md
+
+# Temp files
+tmp/
+
+# Logs
+*.log

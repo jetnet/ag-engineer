@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Circular gauge -->
+  <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" opacity="0.3"/>
+  <path d="M12 2a10 10 0 0 1 8.66 5" stroke-width="2"/>
+  <path d="M20.66 7A10 10 0 0 1 22 12" stroke-width="2"/>
+  <!-- Gauge ticks -->
+  <line x1="12" y1="2" x2="12" y2="4"/>
+  <line x1="20.49" y1="7" x2="18.78" y2="7.99"/>
+  <line x1="22" y1="12" x2="20" y2="12"/>
+  <!-- Rocket -->
+  <path d="M12 16V8l-2.5 3h5L12 8" fill="currentColor" stroke="none"/>
+  <path d="M10.5 16.5l1.5 2 1.5-2" fill="currentColor" opacity="0.6" stroke="none"/>
+  <!-- Exhaust -->
+  <line x1="12" y1="18" x2="12" y2="20" opacity="0.4"/>
+  <line x1="11" y1="19" x2="11" y2="20.5" opacity="0.3"/>
+  <line x1="13" y1="19" x2="13" y2="20.5" opacity="0.3"/>
+</svg>
