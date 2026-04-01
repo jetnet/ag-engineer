@@ -139,6 +139,7 @@ export class ContextService {
     let workspaceMatchId: string | undefined;
     let workspaceMatchTraj: TrajectorySummary | undefined;
     let workspaceMatchTime = 0;
+    let matchCount = 0;
 
     for (const [id, traj] of Object.entries(trajectories)) {
       const modified = new Date(traj.lastModifiedTime || 0).getTime();
@@ -148,6 +149,7 @@ export class ContextService {
         for (const ws of traj.workspaces) {
           const uri = ws.workspaceFolderAbsoluteUri || '';
           if (this.workspaceUris.some((u) => uri.includes(u) || u.includes(uri))) {
+            matchCount++;
             if (modified > workspaceMatchTime) {
               workspaceMatchId = id;
               workspaceMatchTraj = traj;
@@ -158,12 +160,18 @@ export class ContextService {
       }
     }
 
-    if (workspaceMatchId) {
+    if (workspaceMatchId && workspaceMatchTraj) {
+      const shortId = workspaceMatchId.substring(0, 8);
+      const steps = workspaceMatchTraj.stepCount || 0;
+      const status = workspaceMatchTraj.status || 'unknown';
+      if (matchCount > 1) {
+        logDebug(`Trajectory: ${shortId}… (${matchCount} matched, steps=${steps}, status=${status})`);
+      }
       return { id: workspaceMatchId, traj: workspaceMatchTraj };
     }
 
     // No workspace match — don't fallback to another project
-    logDebug('No trajectory found for current workspace');
+    logDebug(`No trajectory found for current workspace (${Object.keys(trajectories).length} total, ${this.workspaceUris.join(', ')})`);
     return {};
   }
 
