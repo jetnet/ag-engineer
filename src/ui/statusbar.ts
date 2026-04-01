@@ -127,9 +127,11 @@ export class StatusBarManager {
     if (this.lastContext) {
       const c = this.lastContext;
       const est = c.isEstimated ? ' (estimated)' : '';
+      const rawInput = c.inputTokens - (c.cacheReadTokens || 0);
       lines.push(`📊 Context${est}`);
       lines.push(`  Model: ${c.model}`);
-      lines.push(`  Input tokens: ${c.inputTokens.toLocaleString()}`);
+      lines.push(`  Input tokens: ${rawInput.toLocaleString()}`);
+      lines.push(`  Cache tokens: ${(c.cacheReadTokens || 0).toLocaleString()}`);
       lines.push(`  Output tokens: ${c.outputTokens.toLocaleString()}`);
       lines.push(`  Total: ${c.totalTokens.toLocaleString()} / ${c.contextLimit.toLocaleString()}`);
       lines.push(`  Used: ${c.usedPercentage.toFixed(1)}%`);
@@ -151,6 +153,12 @@ export class StatusBarManager {
       if (this.lastQuota.tokenUsage?.flowCredits) {
         const fc = this.lastQuota.tokenUsage.flowCredits;
         lines.push(`  Flow Credits: ${fc.available} / ${fc.monthly}`);
+      }
+      if (this.lastQuota.userInfo?.totalAiCredits != null) {
+        lines.push(`  💎 AI Credits: ${this.lastQuota.userInfo.totalAiCredits.toLocaleString()}`);
+      }
+      if (this.lastQuota.userInfo?.planName) {
+        lines.push(`  Plan: ${this.lastQuota.userInfo.planName}`);
       }
       lines.push('');
     }
