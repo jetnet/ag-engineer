@@ -2,7 +2,7 @@
   "name": "antigravity-engineer",
   "displayName": "Antigravity Engineer",
   "description": "Monitor context window usage, model quotas, and token consumption for Google Antigravity IDE",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "jetnet",
   "license": "MIT",
   "engines": {
