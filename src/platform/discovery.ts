@@ -5,13 +5,18 @@
  * Does NOT touch HTTPS/gRPC ports used by the IDE chat (which breaks Cascade).
  *
  * Strategy:
- * 1. Find LS process via `ps` → extract --csrf_token
- * 2. Get all listening ports for that PID via `ss`
- * 3. Probe each port with HTTP (not HTTPS) GetAllCascadeTrajectories
- * 4. Use the first port that responds with valid JSON
+ * 1. Find ALL LS processes via `ps` → extract --csrf_token and --workspace_id
+ * 2. Log all discovered LS instances with workspace IDs
+ * 3. Get all listening ports and probe each with HTTP
+ * 4. Return ALL viable connections (caller picks based on cascade ownership)
+ *
+ * Multi-LS note: Antigravity spawns one LS per workspace. A cascade may
+ * be loaded on ANY LS (not necessarily the one matching the current workspace).
+ * After LoadTrajectory each LS holds its own in-memory fork.
  */
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import * as vscode from 'vscode';
 import * as http from 'http';
 import type { ServerConnection } from '../types';
 import { logDebug, logError, logInfo, logSuccess, logWarning } from '../logging/logger';
@@ -20,18 +25,25 @@ const execAsync = promisify(exec);
 
 // Only match --csrf_token (not --extension_server_csrf_token)
 const CSRF_REGEX = /(?<!extension_server_)--csrf_token[=\s]+(?:["']?)([a-zA-Z0-9\-_.]+)(?:["']?)/;
+const WORKSPACE_ID_REGEX = /--workspace_id\s+(\S+)/;
 
-const PROBE_PATH = '/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories';
+const PROBE_PATH = '/exa.language_server_pb.LanguageServerService/GetUserStatus';
+
+interface LSCandidate {
+  pid: number;
+  csrfToken: string;
+  workspaceId: string;
+}
 
 /**
  * Main discovery entry point.
- * Safe: only probes HTTP ports, won't interfere with IDE chat.
+ * Returns the first viable connection. Logs all LS instances for diagnostics.
  */
 export async function discoverLanguageServer(host: string): Promise<ServerConnection | null> {
   logInfo('Starting language server discovery...');
 
   try {
-    // Step 1: Find LS process and extract CSRF token
+    // Step 1: Find ALL LS processes
     const { stdout } = await execAsync(
       'ps -eo pid,args | grep -v grep | grep language_server | grep csrf_token || true',
       { timeout: 5000 },
@@ -42,36 +54,57 @@ export async function discoverLanguageServer(host: string): Promise<ServerConnec
       return null;
     }
 
-    // Parse PID and CSRF from first matching line
-    const line = stdout.trim().split('\n')[0];
-    const pidMatch = line.match(/^\s*(\d+)/);
-    const csrfMatch = line.match(CSRF_REGEX);
+    const lines = stdout.trim().split('\n');
+    const candidates: LSCandidate[] = [];
 
-    if (!pidMatch || !csrfMatch) {
+    for (const line of lines) {
+      const pidMatch = line.match(/^\s*(\d+)/);
+      const csrfMatch = line.match(CSRF_REGEX);
+      const wsMatch = line.match(WORKSPACE_ID_REGEX);
+
+      if (pidMatch && csrfMatch) {
+        candidates.push({
+          pid: parseInt(pidMatch[1], 10),
+          csrfToken: csrfMatch[1],
+          workspaceId: wsMatch?.[1] || 'unknown',
+        });
+      }
+    }
+
+    if (candidates.length === 0) {
       logWarning('Could not extract PID or CSRF token from process args.');
       return null;
     }
 
-    const pid = parseInt(pidMatch[1], 10);
-    const csrfToken = csrfMatch[1];
-    logInfo(`Found LS PID: ${pid}, CSRF: ${csrfToken.substring(0, 8)}...`);
-
-    // Step 2: Get all listening ports for this PID
-    const ports = await getListeningPorts(pid);
-    if (ports.length === 0) {
-      logWarning(`No listening ports found for PID ${pid}`);
-      return null;
+    // Log all LS instances for diagnostics
+    const currentWs = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || 'none';
+    logInfo(`Found ${candidates.length} LS instance(s) [current workspace: ${currentWs}]`);
+    for (const c of candidates) {
+      logDebug(`  LS PID=${c.pid} workspace_id=${c.workspaceId} csrf=${c.csrfToken.substring(0, 8)}…`);
     }
 
-    logInfo(`PID ${pid} has ${ports.length} listening port(s): ${ports.join(', ')}`);
+    // Step 2: Try workspace-matched first, then others
+    const wsId = 'file_' + currentWs.replace(/\//g, '_').replace(/^_/, '');
+    const sorted = [...candidates].sort((a, b) => {
+      const aMatch = a.workspaceId === wsId ? 0 : 1;
+      const bMatch = b.workspaceId === wsId ? 0 : 1;
+      return aMatch - bMatch;
+    });
 
-    // Step 3: Probe each port with HTTP-only (safe, won't break chat)
-    for (const port of ports) {
-      logDebug(`Probing HTTP ${host}:${port}...`);
-      const ok = await httpProbe(host, port, csrfToken);
-      if (ok) {
-        logSuccess(`Connected to LS HTTP port ${port}`);
-        return { host, port, csrfToken, pid };
+    // Step 3: Probe all candidates, return first that responds
+    for (const candidate of sorted) {
+      const ports = await getListeningPorts(candidate.pid);
+      if (ports.length === 0) continue;
+
+      logInfo(`PID ${candidate.pid} (ws=${candidate.workspaceId}) has ${ports.length} port(s): ${ports.join(', ')}`);
+
+      for (const port of ports) {
+        logDebug(`Probing HTTP ${host}:${port}...`);
+        const ok = await httpProbe(host, port, candidate.csrfToken);
+        if (ok) {
+          logSuccess(`Connected to LS on port ${port} (PID: ${candidate.pid}, ws: ${candidate.workspaceId})`);
+          return { host, port, csrfToken: candidate.csrfToken, pid: candidate.pid };
+        }
       }
     }
 
@@ -81,6 +114,43 @@ export async function discoverLanguageServer(host: string): Promise<ServerConnec
     logError(`Discovery failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
+}
+
+/**
+ * Discover ALL language servers that respond to HTTP.
+ * Used by ContextService to find which LS owns a particular cascade.
+ */
+export async function discoverAllLanguageServers(host: string): Promise<ServerConnection[]> {
+  const connections: ServerConnection[] = [];
+
+  try {
+    const { stdout } = await execAsync(
+      'ps -eo pid,args | grep -v grep | grep language_server | grep csrf_token || true',
+      { timeout: 5000 },
+    );
+    if (!stdout?.trim()) return connections;
+
+    const lines = stdout.trim().split('\n');
+    for (const line of lines) {
+      const pidMatch = line.match(/^\s*(\d+)/);
+      const csrfMatch = line.match(CSRF_REGEX);
+      if (!pidMatch || !csrfMatch) continue;
+
+      const pid = parseInt(pidMatch[1], 10);
+      const csrfToken = csrfMatch[1];
+      const ports = await getListeningPorts(pid);
+
+      for (const port of ports) {
+        const ok = await httpProbe(host, port, csrfToken);
+        if (ok) {
+          connections.push({ host, port, csrfToken, pid });
+          break; // One HTTP port per PID is enough
+        }
+      }
+    }
+  } catch { /* best-effort */ }
+
+  return connections;
 }
 
 /**
@@ -107,7 +177,6 @@ async function getListeningPorts(pid: number): Promise<number[]> {
 
 /**
  * HTTP-only probe — sends a lightweight RPC request via plain HTTP.
- * Does NOT try HTTPS (which would interfere with IDE chat connections).
  */
 function httpProbe(host: string, port: number, csrfToken: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -133,7 +202,7 @@ function httpProbe(host: string, port: number, csrfToken: string): Promise<boole
         res.on('end', () => {
           if (res.statusCode === 200) {
             try {
-              JSON.parse(data); // Verify it's valid JSON
+              JSON.parse(data);
               resolve(true);
             } catch {
               logDebug(`Port ${port}: HTTP 200 but invalid JSON`);

@@ -192,16 +192,111 @@ export class ContextService {
   }
 
   /**
-   * Fetch the latest token data using the dedicated GeneratorMetadata API.
+   * Fetch the latest token data using a multi-source strategy:
    *
-   * GetCascadeTrajectoryGeneratorMetadata returns ONLY the generatorMetadata
-   * array — lighter than GetCascadeTrajectory (no step data) and often
-   * 1 entry fresher. Each entry has `chatModel.usage` with live token counts.
+   * 1. PRIMARY: GetCascadeTrajectorySteps → steps with metadata.modelUsage
+   *    Returns a sliding window of ~1135 steps. The LAST step with modelUsage
+   *    is the freshest live token data available (updates per-turn).
    *
-   * Fallback: GetCascadeTrajectorySteps is frozen after checkpoint/truncation.
-   * StreamAgentStateUpdates needs Connect streaming framing (future work).
+   * 2. FALLBACK: GetCascadeTrajectoryGeneratorMetadata → generatorMetadata array
+   *    Lighter but updates in batches (can lag 45+ entries behind).
+   *
+   * 3. METADATA: GetCascadeTrajectory → numTotalSteps/numTotalGM for diagnostics
    */
   private async fetchLatestTokenInfo(
+    connection: ServerConnection,
+    cascadeId: string,
+  ): Promise<StepTokenInfo | null> {
+    // --- Source 1: Steps modelUsage (freshest) ---
+    const stepsResult = await this.fetchFromStepsModelUsage(connection, cascadeId);
+
+    // --- Source 2: GM (fallback if steps has no modelUsage) ---
+    const gmResult = await this.fetchFromGeneratorMetadata(connection, cascadeId);
+
+    // --- Diagnostic: compare sources ---
+    const stepsTotal = stepsResult
+      ? stepsResult.inputTokens + stepsResult.cacheReadTokens + stepsResult.outputTokens
+      : 0;
+    const gmTotal = gmResult
+      ? gmResult.inputTokens + gmResult.cacheReadTokens + gmResult.outputTokens
+      : 0;
+
+    // Also grab numTotalSteps/numTotalGM for diagnostics
+    const trajMeta = await this.rpcCall<Record<string, unknown>>(
+      connection,
+      '/exa.language_server_pb.LanguageServerService/GetCascadeTrajectory',
+      { cascadeId },
+      (d) => d,
+    );
+    const numTotalSteps = trajMeta?.numTotalSteps ?? '?';
+    const numTotalGM = trajMeta?.numTotalGeneratorMetadata ?? '?';
+    const status = trajMeta?.status ?? '?';
+
+    logDebug(`Sources: steps=${stepsTotal.toLocaleString()} GM=${gmTotal.toLocaleString()} | totalSteps=${numTotalSteps} totalGM=${numTotalGM} status=${status}`);
+
+    // Pick the freshest source (higher total = more recent context window)
+    if (stepsTotal >= gmTotal && stepsResult) {
+      logDebug(`→ Using Steps modelUsage (fresher by ${(stepsTotal - gmTotal).toLocaleString()})`);
+      return stepsResult;
+    } else if (gmResult) {
+      logDebug(`→ Using GM (fresher by ${(gmTotal - stepsTotal).toLocaleString()})`);
+      return gmResult;
+    }
+
+    return null;
+  }
+
+  /**
+   * Fetch token data from Steps API — modelUsage on individual steps.
+   */
+  private async fetchFromStepsModelUsage(
+    connection: ServerConnection,
+    cascadeId: string,
+  ): Promise<StepTokenInfo | null> {
+    const STEPS_PATH =
+      '/exa.language_server_pb.LanguageServerService/GetCascadeTrajectorySteps';
+
+    const data = await this.rpcCall<Record<string, unknown>>(
+      connection,
+      STEPS_PATH,
+      { cascadeId },
+      (d) => d,
+    );
+
+    const steps = (data?.steps ?? []) as Array<Record<string, unknown>>;
+    if (steps.length === 0) return null;
+
+    // Walk backwards to find the LAST step with modelUsage
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const meta = steps[i].metadata as Record<string, unknown> | undefined;
+      const mu = meta?.modelUsage as Record<string, string> | undefined;
+      if (!mu) continue;
+
+      const inputTokens = parseInt(mu.inputTokens || '0', 10);
+      const cacheReadTokens = parseInt(mu.cacheReadTokens || '0', 10);
+      const outputTokens = parseInt(mu.outputTokens || '0', 10);
+
+      if (inputTokens === 0 && cacheReadTokens === 0) continue;
+
+      const model = String(mu.model || 'Unknown');
+      const apiProvider = String(mu.apiProvider || '');
+      const contextTotal = inputTokens + cacheReadTokens + outputTokens;
+
+      logDebug(
+        `Steps[${i}/${steps.length}]: context=${contextTotal.toLocaleString()} ` +
+        `(in=${inputTokens.toLocaleString()} cache=${cacheReadTokens.toLocaleString()} out=${outputTokens.toLocaleString()})`,
+      );
+
+      return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider };
+    }
+
+    return null;
+  }
+
+  /**
+   * Fetch token data from GeneratorMetadata API (batch-updated, may lag).
+   */
+  private async fetchFromGeneratorMetadata(
     connection: ServerConnection,
     cascadeId: string,
   ): Promise<StepTokenInfo | null> {
@@ -216,46 +311,13 @@ export class ContextService {
     );
 
     const gmArray = (data?.generatorMetadata ?? []) as Array<Record<string, unknown>>;
+    if (gmArray.length === 0) return null;
 
-    if (gmArray.length === 0) {
-      logDebug('No generatorMetadata returned');
-      return null;
-    }
+    logDebug(`GM: ${gmArray.length} entries`);
 
-    logDebug(`Got ${gmArray.length} GM entries via GetCascadeTrajectoryGeneratorMetadata`);
-
-    // --- Debug: peak context & model distribution ---
-    let peakContext = 0;
-    let peakIdx = 0;
-    const modelCounts: Record<string, number> = {};
-    for (let i = 0; i < gmArray.length; i++) {
-      const u = ((gmArray[i].chatModel as Record<string, unknown>)?.usage ?? {}) as Record<string, string>;
-      const total = parseInt(u.inputTokens || '0', 10) + parseInt(u.cacheReadTokens || '0', 10) + parseInt(u.outputTokens || '0', 10);
-      if (total > peakContext) { peakContext = total; peakIdx = i; }
-      const m = String(u.model || '').replace('MODEL_PLACEHOLDER_', 'M').replace('MODEL_', '') || '?';
-      modelCounts[m] = (modelCounts[m] || 0) + 1;
-    }
-    logDebug(`Peak context: ${peakContext.toLocaleString()} at GM[${peakIdx}]`);
-    logDebug(`Models: ${Object.entries(modelCounts).map(([m, c]) => `${m}×${c}`).join(', ')}`);
-
-    // --- Debug: last 3 entries for trend ---
-    const trendStart = Math.max(0, gmArray.length - 3);
-    for (let i = trendStart; i < gmArray.length; i++) {
-      const gm = gmArray[i];
-      const u = ((gm.chatModel as Record<string, unknown>)?.usage ?? {}) as Record<string, string>;
-      const inp = parseInt(u.inputTokens || '0', 10);
-      const cache = parseInt(u.cacheReadTokens || '0', 10);
-      const out = parseInt(u.outputTokens || '0', 10);
-      const total = inp + cache + out;
-      const m = String(u.model || '').replace('MODEL_PLACEHOLDER_', 'M');
-      const steps = (gm.stepIndices as number[]) || [];
-      logDebug(`  trend GM[${i}] steps=[${steps.join(',')}] ${total.toLocaleString()} (in=${inp} cache=${cache.toLocaleString()} out=${out}) ${m}`);
-    }
-
-    // Walk backwards to find the latest GM entry with token data
+    // Walk backwards to find the latest entry with token data
     for (let i = gmArray.length - 1; i >= 0; i--) {
-      const gm = gmArray[i];
-      const chatModel = gm.chatModel as Record<string, unknown> | undefined;
+      const chatModel = gmArray[i].chatModel as Record<string, unknown> | undefined;
       const usage = (chatModel?.usage ?? {}) as Record<string, string>;
 
       const inputTokens = parseInt(usage.inputTokens || '0', 10);
@@ -265,15 +327,6 @@ export class ContextService {
       const apiProvider = String(usage.apiProvider || '');
 
       if (inputTokens === 0 && cacheReadTokens === 0) continue;
-
-      const contextTotal = inputTokens + cacheReadTokens + outputTokens;
-      const stepIndices = gm.stepIndices as number[] | undefined;
-      logDebug(
-        `→ Using GM[${i}/${gmArray.length}] steps=${JSON.stringify(stepIndices)}: ` +
-        `context=${contextTotal.toLocaleString()} ` +
-        `(in=${inputTokens.toLocaleString()} cache=${cacheReadTokens.toLocaleString()} out=${outputTokens.toLocaleString()}) ` +
-        `model=${model}`,
-      );
 
       return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider };
     }

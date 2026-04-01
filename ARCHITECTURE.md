@@ -11,18 +11,19 @@ graph TB
     subgraph Extension Host
         EXT[extension.ts<br/>Activation & Wiring]
         POLL[Poller<br/>setTimeout chain]
-        DISC[Discovery<br/>Process Scanner]
+        DISC[Discovery<br/>Multi-LS Scanner]
         RPC[RPC Client<br/>HTTP POST]
         QS[Quota Service<br/>GetUserStatus]
-        CS[Context Service<br/>GetCascadeTrajectoryGeneratorMetadata]
+        CS[Context Service<br/>Multi-Source Token Tracking]
         MR[Model Registry<br/>Cockpit Cache JSON]
         SB[Status Bar<br/>Compact Metrics]
         SIDE[Sidebar WebView<br/>Dashboard]
         CFG[Config / Settings]
     end
 
-    subgraph Antigravity Language Server
-        LS["127.0.0.1:PORT<br/>LanguageServerService"]
+    subgraph "Antigravity Language Servers (1 per workspace)"
+        LS1["LS₁ 127.0.0.1:PORT₁<br/>workspace: project-A"]
+        LS2["LS₂ 127.0.0.1:PORT₂<br/>workspace: project-B"]
     end
 
     subgraph OS / Filesystem
@@ -36,7 +37,7 @@ graph TB
     EXT --> SB
     EXT --> SIDE
 
-    DISC -->|"scan ps for --csrf_token"| PS
+    DISC -->|"scan ps for --csrf_token<br/>+ --workspace_id"| PS
     DISC -->|"probe ports via ss"| PS
     DISC -->|ServerConnection| RPC
 
@@ -44,8 +45,9 @@ graph TB
     POLL -->|tick every N sec| CS
 
     QS -->|"POST GetUserStatus"| RPC
-    CS -->|"POST GetAllCascadeTrajectories<br/>POST GetCascadeTrajectoryGeneratorMetadata"| RPC
-    RPC -->|"HTTP + CSRF header"| LS
+    CS -->|"POST GetCascadeTrajectorySteps<br/>POST GetCascadeTrajectoryGeneratorMetadata<br/>POST GetCascadeTrajectory"| RPC
+    RPC -->|"HTTP + CSRF header"| LS1
+    RPC -->|"HTTP + CSRF header"| LS2
     MR -->|"watch & parse JSON"| CACHE
 
     QS -->|QuotaSnapshot| SB
@@ -57,70 +59,106 @@ graph TB
     CFG -->|display toggles| SB
 ```
 
-## Data Flow
+## Data Flow — Token Tracking
 
 ```mermaid
-flowchart LR
-    subgraph RPC Endpoints
-        A["GetUserStatus"] -->|userTier, planStatus,<br/>cascadeModelConfigData| B[QuotaSnapshot]
-        C["GetAllCascadeTrajectories"] -->|cascadeId, stepCount,<br/>workspace match| D[Active Conversation]
-        D --> E["GetCascadeTrajectoryGeneratorMetadata<br/>(all GM entries)"]
-        E -->|"last GM entry:<br/>chatModel.usage with<br/>inputTokens, outputTokens,<br/>cacheReadTokens, model,<br/>apiProvider"| F[ContextSnapshot]
+flowchart TD
+    subgraph "Multi-Source Strategy (freshness order)"
+        S1["① GetCascadeTrajectorySteps<br/>→ steps[].metadata.modelUsage<br/>🟢 FRESHEST (per-flush)"]
+        S2["② GetCascadeTrajectoryGeneratorMetadata<br/>→ generatorMetadata[].chatModel.usage<br/>🟡 BATCH (lags 45+ entries)"]
+        S3["③ GetCascadeTrajectory<br/>→ numTotalSteps, numTotalGM<br/>🔵 METADATA only"]
     end
 
-    subgraph UI Layer
-        B --> G[Status Bar]
-        B --> H[Sidebar Dashboard]
-        F --> G
-        F --> H
+    S1 --> CMP{Compare totals}
+    S2 --> CMP
+    S3 -->|diagnostic| LOG[Debug Log]
+    CMP -->|"Pick higher total<br/>(= more recent)"| RESULT[StepTokenInfo]
+    RESULT --> SNAP[ContextSnapshot]
+
+    subgraph UI
+        SNAP --> SB[Status Bar]
+        SNAP --> SIDE[Sidebar]
     end
+```
+
+### Multi-LS Architecture
+
+Antigravity spawns **one Language Server per workspace**. Each LS has its own:
+- PID, CSRF token, workspace_id
+- HTTP port (JSON-RPC), HTTPS port (gRPC), extension port
+- In-memory trajectory fork after `LoadTrajectory`
+
+**Critical**: A cascade/conversation may be loaded on ANY LS — not necessarily the one matching the current VS Code workspace. Per-conversation reads must be routed through the LS that owns the data, which may differ from the workspace-matched LS.
+
+Discovery logs all LS instances with workspace IDs for diagnostics:
+```
+Found 2 LS instance(s) [current workspace: /home/user/project-A]
+  LS PID=12345 workspace_id=file_home_user_project_B csrf=e4b06aaa…
+  LS PID=67890 workspace_id=file_home_user_project_A csrf=b982aa40…
 ```
 
 ### LS RPC Endpoints — API Reference
 
-| Endpoint | Purpose | Status |
-|---|---|---|
-| `GetUserStatus` | Plan, quotas, model configs | ✅ Live, primary |
-| `GetAllCascadeTrajectories` | Discover cascadeId by workspace | ✅ Live (may return empty) |
-| `GetCascadeTrajectoryGeneratorMetadata` | **Token data** — one GM entry per LLM call | ✅ Live, primary |
-| `GetCascadeTrajectory` | Trajectory summary + GM (nested) | ⚠️ Works, but heavier + 1 entry behind |
-| `GetCascadeTrajectorySteps` | Step buffer (~1135 steps) | ❌ Frozen after checkpoint/truncation |
-| `GetUserTrajectoryDescriptions` | List of trajectory IDs per workspace | ✅ Live, discovery only |
-| `StreamAgentStateUpdates` | Real-time push of steps | ⏳ Needs Connect streaming framing (future) |
-| `GetBrowserOpenConversation` | Currently open conversation | ⚠️ Only works if browser panel is open |
+| Endpoint | Purpose | Status | Freshness |
+|---|---|---|---|
+| `GetUserStatus` | Plan, quotas, model configs | ✅ Live, primary | Real-time |
+| `GetAllCascadeTrajectories` | Discover cascadeId by workspace | ✅ Live (may return empty) | Real-time |
+| `GetCascadeTrajectorySteps` | Step buffer (~1135 sliding window) | ✅ **Primary token source** | Per-flush (freshest) |
+| `GetCascadeTrajectoryGeneratorMetadata` | GM array — one per LLM call | ✅ **Fallback token source** | Batch (lags 45+ entries) |
+| `GetCascadeTrajectory` | Trajectory summary + `numTotalSteps`/`numTotalGM` | ✅ Diagnostics | Per-flush |
+| `GetUserTrajectoryDescriptions` | List of trajectory IDs per workspace | ✅ Live, discovery only | Real-time |
+| `StreamAgentStateUpdates` | Real-time push of full state | ⚠️ Works (initial snapshot only) | Real-time during RUNNING |
+| `GetBrowserOpenConversation` | Currently open conversation | ⚠️ Only if browser panel open | Real-time |
 
-### Token Data Model (from GeneratorMetadata)
+### Token Data Sources
 
-Each `generatorMetadata[]` entry contains `chatModel.usage`:
+#### Source 1: Steps `modelUsage` (Primary)
+
+`GetCascadeTrajectorySteps` returns a sliding window of ~1135 steps. Each step with `metadata.modelUsage` contains:
 
 | Field | Type | Description |
 |---|---|---|
-| `model` | string | Internal model ID (e.g. `MODEL_PLACEHOLDER_M26`) |
-| `inputTokens` | string | Uncached prompt tokens sent to model |
+| `inputTokens` | string | Uncached prompt tokens |
 | `cacheReadTokens` | string | Cached prompt tokens (Anthropic prompt cache) |
-| `outputTokens` | string | Tokens generated by model |
-| `responseOutputTokens` | string | Same as outputTokens (always equal) |
+| `outputTokens` | string | Model output tokens |
+| `model` | string | Internal model ID |
 | `apiProvider` | string | Provider (e.g. `API_PROVIDER_ANTHROPIC_VERTEX`) |
-| `responseId` | string | Request ID (e.g. `req_vrtx_011CZcp...`) |
 
-Additional fields per entry: `stepIndices` (which trajectory steps this LLM call covers), `executionId`, optional `plannerConfig`.
+Walking backwards from the last step gives the **freshest available token counts**.
 
-**Context window usage** = `inputTokens + cacheReadTokens + outputTokens`.
+#### Source 2: GeneratorMetadata (Fallback)
 
-> Note: `inputTokens` is the *uncached* portion; `cacheReadTokens` is the *cached* portion.
+`GetCascadeTrajectoryGeneratorMetadata` returns the full `generatorMetadata[]` array. Each entry has `chatModel.usage` with the same fields. Updates in **batches** — can lag behind Steps by 45+ entries and 50K+ tokens.
+
+#### Token Formula
+
+**Context window usage** = `inputTokens + cacheReadTokens + outputTokens`
+
+> `inputTokens` is the *uncached* portion; `cacheReadTokens` is the *cached* portion.
 > Together they represent the full input sent to the model. Both occupy context window space.
 
 ### API Behavior Notes
 
-- **`GetCascadeTrajectoryGeneratorMetadata`**: Returns the full `generatorMetadata[]` array directly (not nested inside `trajectory`). Typically 1 entry fresher than `GetCascadeTrajectory`. Response can be large (~7 MB for 500+ entries). No pagination params.
-- **`GetCascadeTrajectorySteps`**: Ignores `startIndex`/`endIndex` params entirely. Always returns a frozen ~1135-step buffer. Buffer stops updating after checkpoint/truncation. Not suitable for live tracking.
-- **`GetCascadeTrajectory`**: GM entries are nested inside `trajectory.generatorMetadata[]`. Also returns `numTotalSteps` and `numTotalGeneratorMetadata` counts.
-- **`StreamAgentStateUpdates`**: Requires Connect streaming framing (`Content-Type: application/connect+json`, binary envelope: `0x00 + uint32_be(length) + JSON`). Returns 415 with regular JSON POST. Accepts `conversationId` (likely same as `cascadeId`).
+- **`GetCascadeTrajectorySteps`**: Returns a ~1135-step sliding window. Ignores `startIndex`/`endIndex` params — always returns the same window centered around the latest checkpoint. The LAST step with `modelUsage` is the freshest token data.
+- **`GetCascadeTrajectoryGeneratorMetadata`**: Returns the full `generatorMetadata[]` array directly. Batch-updated: `numTotalGM` (from trajectory) can exceed the returned array size by 45+ entries. No pagination params.
+- **`GetCascadeTrajectory`**: Returns `numTotalSteps` and `numTotalGeneratorMetadata` for diagnostic comparison. GM entries nested inside `trajectory.generatorMetadata[]` — often less fresh than the dedicated GM endpoint.
+- **`StreamAgentStateUpdates`**: Requires Connect streaming framing:
+  - `Content-Type: application/connect+json`
+  - Binary envelope: `0x00 + uint32_be(length) + JSON_payload`
+  - Returns full state snapshot (17MB+) as first frame
+  - Accepts `{conversationId}` (same as cascadeId)
+  - `transfer-encoding: chunked` — long-lived connection
+  - During IDLE: sends initial snapshot only, no further deltas observed
+  - During RUNNING: likely sends delta frames (not yet confirmed)
+  - Future work: implement as primary real-time source
 
 ## Module Responsibilities
 
 ### Discovery (`platform/discovery.ts`)
-- Scans OS processes for `--csrf_token` flags via `ps aux`
+- Scans OS processes for ALL `language_server` instances via `ps aux`
+- Extracts `--csrf_token` and `--workspace_id` from each process
+- Logs all LS instances with workspace IDs for diagnostics
+- Prioritizes workspace-matched LS, falls back to first responder
 - Discovers listening ports via `ss -tlnp` (Linux) matched by PID
 - Probes each port with HTTP POST to `GetUserStatus` to find the JSON-RPC port
 - Filters out gRPC/HTTPS ports (only HTTP works without cert conflicts)
@@ -147,10 +185,12 @@ Additional fields per entry: `stepIndices` (which trajectory steps this LLM call
 
 ### Context Service (`services/context.ts`)
 - **Step 1**: `GetAllCascadeTrajectories` → find conversation matching current workspace URIs
-- **Step 2**: `GetCascadeTrajectoryGeneratorMetadata` with `cascadeId` → fetch all GM entries
-- **Step 3**: Walk backwards to find latest GM entry with non-zero token data
+- **Step 2**: Multi-source token fetch:
+  - Source 1: `GetCascadeTrajectorySteps` → last step with `metadata.modelUsage`
+  - Source 2: `GetCascadeTrajectoryGeneratorMetadata` → last GM entry with token data
+  - Source 3: `GetCascadeTrajectory` → `numTotalSteps`/`numTotalGM` for diagnostics
+- **Step 3**: Compare source totals, pick the **freshest** (highest total = most recent context)
 - **Step 4**: Extract `inputTokens + cacheReadTokens + outputTokens` = context window usage
-- **Debug logging**: Peak context, model distribution, last 3 entries trend
 - Model detection via `apiProvider` → display name mapping
 - Context limits from Model Registry (`maxTokens` per model)
 - **No estimation fallback** — only shows real data, empty if no conversation exists for workspace
@@ -204,3 +244,10 @@ graph LR
 - No external network calls
 - No telemetry or analytics
 - Token values redacted in diagnostic logs
+
+## Known Limitations
+
+1. **Batch-updated data**: Both Steps and GM sources update in batches (not per-turn). Token counts may lag a few turns behind the actual context window state.
+2. **No per-turn push**: `StreamAgentStateUpdates` only sends an initial snapshot during IDLE. Delta frames during RUNNING are not yet confirmed/implemented.
+3. **Multi-LS routing**: A cascade may be loaded on a different LS than the workspace-matched one. Current discovery probes all LS instances but doesn't guarantee routing to the cascade owner.
+4. **Sliding window**: Steps API returns ~1135 steps. For very long conversations, older steps fall out of the window.
