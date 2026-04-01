@@ -109,6 +109,7 @@ export interface ContextSnapshot {
   conversationId?: string;
   model?: string;
   inputTokens: number;
+  cacheReadTokens: number;
   outputTokens: number;
   totalTokens: number;
   contextLimit: number;

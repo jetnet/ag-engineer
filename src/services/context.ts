@@ -262,7 +262,9 @@ export class ContextService {
 
     // Token data
     const isEstimated = !tokenInfo;
-    const inputTokens = tokenInfo ? tokenInfo.inputTokens + tokenInfo.cacheReadTokens : 0;
+    const rawInput = tokenInfo ? tokenInfo.inputTokens : 0;
+    const cacheRead = tokenInfo ? tokenInfo.cacheReadTokens : 0;
+    const inputTokens = rawInput + cacheRead;
     const outputTokens = tokenInfo ? tokenInfo.outputTokens : 0;
     const totalTokens = inputTokens + outputTokens;
     const usedPct = contextLimit > 0 ? (totalTokens / contextLimit) * 100 : 0;
@@ -282,6 +284,7 @@ export class ContextService {
       conversationId,
       model: modelName,
       inputTokens,
+      cacheReadTokens: cacheRead,
       outputTokens,
       totalTokens,
       contextLimit,

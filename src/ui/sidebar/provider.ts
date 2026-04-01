@@ -116,6 +116,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       --error: var(--vscode-errorForeground, #f44);
       --warning: var(--vscode-editorWarning-foreground, #fa0);
       --success: #4caf50;
+      --clr-input: #36b5a0;
+      --clr-cache: #5ec4d4;
+      --clr-output: #b07cd8;
+      --clr-remaining: rgba(255,255,255,0.08);
       --input-bg: var(--vscode-input-background);
       --button-bg: var(--vscode-button-background);
       --button-fg: var(--vscode-button-foreground);
@@ -159,23 +163,34 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     .estimated { font-style: italic; opacity: 0.6; }
     .estimated::after { content: ' ~'; font-size: 10px; }
 
-    /* Progress bar */
+    /* Stacked progress bar */
     .progress-container {
       width: 100%;
-      height: 8px;
-      background: var(--border);
-      border-radius: 4px;
+      height: 10px;
+      background: var(--clr-remaining);
+      border-radius: 5px;
       overflow: hidden;
-      margin: 6px 0;
+      margin: 8px 0;
+      display: flex;
     }
-    .progress-bar {
+    .seg {
       height: 100%;
-      border-radius: 4px;
-      transition: width 0.5s ease, background 0.3s ease;
+      transition: width 0.5s ease;
+      min-width: 0;
     }
-    .progress-ok { background: var(--success); }
-    .progress-warn { background: var(--warning); }
-    .progress-crit { background: var(--error); }
+    .seg-input { background: var(--clr-input); }
+    .seg-cache { background: var(--clr-cache); }
+    .seg-output { background: var(--clr-output); border-radius: 0 5px 5px 0; }
+    .seg-input:first-child { border-radius: 5px 0 0 5px; }
+
+    /* Color legend dot */
+    .legend-dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      margin-right: 5px;
+      vertical-align: middle;
+    }
 
     /* Model quota list */
     .model-row {
@@ -269,18 +284,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           <span id="ctx-model" class="value">—</span>
         </div>
         <div class="progress-container">
-          <div id="ctx-bar" class="progress-bar progress-ok" style="width: 0%"></div>
+          <div id="seg-input" class="seg seg-input" style="width:0%"></div>
+          <div id="seg-cache" class="seg seg-cache" style="width:0%"></div>
+          <div id="seg-output" class="seg seg-output" style="width:0%"></div>
         </div>
         <div class="row">
           <span id="ctx-used" class="value">0</span>
           <span id="ctx-limit" class="label">/ 0</span>
         </div>
         <div class="row">
-          <span class="label">Input</span>
+          <span class="label"><span class="legend-dot" style="background:var(--clr-input)"></span>Input</span>
           <span id="ctx-input" class="value">—</span>
         </div>
         <div class="row">
-          <span class="label">Output</span>
+          <span class="label"><span class="legend-dot" style="background:var(--clr-cache)"></span>Cache</span>
+          <span id="ctx-cache" class="value">—</span>
+        </div>
+        <div class="row">
+          <span class="label"><span class="legend-dot" style="background:var(--clr-output)"></span>Output</span>
           <span id="ctx-output" class="value">—</span>
         </div>
         <div class="row">
@@ -374,14 +395,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       document.getElementById('ctx-model').className = ctx.isEstimated ? 'value estimated' : 'value';
       document.getElementById('ctx-used').textContent = fmt(ctx.totalTokens) + est;
       document.getElementById('ctx-limit').textContent = '/ ' + fmt(ctx.contextLimit);
-      document.getElementById('ctx-input').textContent = fmt(ctx.inputTokens) + est;
+
+      // Separate input into raw input and cache
+      const rawInput = ctx.inputTokens - (ctx.cacheReadTokens || 0);
+      const cache = ctx.cacheReadTokens || 0;
+      document.getElementById('ctx-input').textContent = fmt(rawInput) + est;
+      document.getElementById('ctx-cache').textContent = fmt(cache) + est;
       document.getElementById('ctx-output').textContent = fmt(ctx.outputTokens) + est;
       document.getElementById('ctx-remaining').textContent = fmt(ctx.remainingTokens);
       document.getElementById('ctx-pct').textContent = ctx.usedPercentage.toFixed(1) + '%';
 
-      const bar = document.getElementById('ctx-bar');
-      bar.style.width = Math.min(ctx.usedPercentage, 100) + '%';
-      bar.className = 'progress-bar ' + progressClass(ctx.usedPercentage);
+      // Stacked bar segments as % of contextLimit
+      const limit = ctx.contextLimit || 1;
+      const inputPct = (rawInput / limit) * 100;
+      const cachePct = (cache / limit) * 100;
+      const outputPct = (ctx.outputTokens / limit) * 100;
+      document.getElementById('seg-input').style.width = Math.min(inputPct, 100) + '%';
+      document.getElementById('seg-cache').style.width = Math.min(cachePct, 100) + '%';
+      document.getElementById('seg-output').style.width = Math.min(outputPct, 100) + '%';
     }
 
     function renderQuota(snapshot) {
