@@ -21,6 +21,8 @@ import { SidebarProvider } from './ui/sidebar/provider';
 import { registerCommands } from './commands';
 import type { ServerConnection, DiagnosticInfo } from './types';
 
+const { version: EXTENSION_VERSION } = require('../package.json');
+
 let statusBar: StatusBarManager;
 let sidebarProvider: SidebarProvider;
 let quotaService: QuotaService;
@@ -36,7 +38,7 @@ let diagnostics: DiagnosticInfo = {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   initLogger(context);
-  logInfo('Antigravity Engineer v0.2.0 activating...');
+  logInfo(`Antigravity Engineer v${EXTENSION_VERSION} activating...`);
 
   const config = getConfig();
   setDebugMode(config.debugMode);
@@ -67,6 +69,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       sidebarProvider,
     ),
   );
+
+  // === Bootstrap UI from Cache ===
+  const cachedQuota = context.globalState.get<any>('lastQuotaSnapshot');
+  if (cachedQuota && cachedQuota.timestamp) {
+    try {
+      const restored = { ...cachedQuota, timestamp: new Date(cachedQuota.timestamp) };
+      statusBar.updateQuota(restored);
+      sidebarProvider.updateQuota(restored);
+    } catch { /* ignore cache errors */ }
+  }
 
   // Wire service updates to UI
   quotaService.onUpdate((snapshot) => {
@@ -105,6 +117,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       setDebugMode(newConfig.debugMode);
       poller.setInterval(newConfig.pollingInterval * 1000);
     }),
+  );
+
+  // === UI Event Listeners ===
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      // Trigger instant refresh on file switch to keep workspace context fresh
+      poller.triggerNow();
+    })
   );
 
   // === Main Poll Loop ===

@@ -2,7 +2,7 @@
   "name": "antigravity-engineer",
   "displayName": "Antigravity Engineer",
   "description": "Monitor context window usage, model quotas, and token consumption for Google Antigravity IDE",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "publisher": "jetnet",
   "license": "MIT",
   "engines": {
@@ -86,8 +86,13 @@
         },
         "antigravityEngineer.contextLimitOverrides": {
           "type": "object",
-          "default": {},
-          "description": "Override context window limits per model (e.g. {\"claude-opus-4.6\": 200000})"
+          "default": {
+            "gemini-2.5-flash": 1048576,
+            "gemini-3.0-pro": 2097152,
+            "claude-3-5-sonnet": 200000,
+            "claude-3-7-sonnet": 200000
+          },
+          "description": "Overrides for max tokens based on model internal key matching"
         },
         "antigravityEngineer.serverHost": {
           "type": "string",

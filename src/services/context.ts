@@ -17,6 +17,7 @@ import type { ContextSnapshot, ContextUpdateCallback, ServerConnection } from '.
 import { logDebug, logInfo, logWarning } from '../logging/logger';
 import type { ModelRegistry } from './model-registry';
 import * as http from 'http';
+import * as vscode from 'vscode';
 
 
 /** Model placeholder → display name mapping (from apiProvider) */
@@ -47,6 +48,8 @@ interface StepTokenInfo {
   estimatedTokensUsed?: number;
   /** Optional breakdown by category */
   tokenBreakdown?: TokenBreakdown;
+  /** Index for arbitration */
+  progressionIndex?: number;
 }
 
 interface TokenBreakdown {
@@ -68,6 +71,7 @@ export class ContextService {
   private tokenHistory: Array<{ timestamp: Date; total: number }> = [];
   private readonly maxHistory = 100;
   private modelRegistry: ModelRegistry | null = null;
+  private suppressedLoadTrajectories = new Set<string>();
 
   /** Workspace URIs to match against trajectories */
   private workspaceUris: string[] = [];
@@ -104,65 +108,92 @@ export class ContextService {
         serversToTry.push(connection);
       }
 
-      // We will find the absolute freshest trajectory that matches this workspace
       let bestGlobalId = '';
-      let bestGlobalTraj = null;
-      let bestGlobalConn = null;
+      let bestGlobalTraj: any = null;
+      let bestGlobalConn: ServerConnection | null = null;
       let bestGlobalTime = 0;
 
+      // Pass 1: Try GetBrowserOpenConversation to find the definitive active chat
       for (const srv of serversToTry) {
         try {
-          const trajectories = await this.rpcCall(
+          const resp = await this.rpcCall<Record<string, any>>(
             srv,
-            '/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories',
+            '/exa.language_server_pb.LanguageServerService/GetBrowserOpenConversation',
             {},
-            (data) => (data.trajectorySummaries as Record<string, any>) || null,
+            (d) => d
           );
-          if (!trajectories) continue;
+          if (resp && resp.cascadeId) {
+            bestGlobalId = resp.cascadeId;
+            bestGlobalConn = srv;
+            
+            // Get trajectory summary for status, stepCount, etc.
+            const trajMeta = await this.rpcCall<Record<string, any>>(
+              srv,
+              '/exa.language_server_pb.LanguageServerService/GetCascadeTrajectory',
+              { cascadeId: bestGlobalId },
+              (d) => d
+            );
+            if (trajMeta) {
+              bestGlobalTraj = trajMeta;
+            } else {
+              // Fallback fake summary if the call fails but we know it's active
+              bestGlobalTraj = { status: 'RUNNING' }; 
+            }
+            break;
+          }
+        } catch { /* ignore */ }
+      }
 
-          for (const [id, traj] of Object.entries(trajectories)) {
-            // Must belong to this workspace
-            if (this.workspaceUris.length > 0 && traj.workspaces) {
-              let match = false;
-              for (const ws of traj.workspaces) {
-                const uri = ws.workspaceFolderAbsoluteUri || '';
-                if (this.workspaceUris.some((u) => uri.includes(u) || u.includes(uri))) {
-                  match = true;
-                  break;
+      // Pass 2: Fallback to GetAllCascadeTrajectories workspace matching if Pass 1 failed
+      if (!bestGlobalId || !bestGlobalTraj) {
+        logDebug('No open browser conversation found; falling back to workspace trajectory matching...');
+        for (const srv of serversToTry) {
+          try {
+            const trajectories = await this.rpcCall(
+              srv,
+              '/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories',
+              {},
+              (data) => (data.trajectorySummaries as Record<string, any>) || null,
+            );
+            if (!trajectories) continue;
+
+            for (const [id, traj] of Object.entries(trajectories)) {
+              if (this.workspaceUris.length > 0 && traj.workspaces) {
+                let match = false;
+                for (const ws of traj.workspaces) {
+                  const uri = ws.workspaceFolderAbsoluteUri || '';
+                  if (this.workspaceUris.some((u) => uri.includes(u) || u.includes(uri))) {
+                    match = true;
+                    break;
+                  }
+                }
+                if (!match) continue;
+              }
+
+              let modified = 0;
+              const lmt = traj.lastModifiedTime;
+              if (lmt) {
+                if (typeof lmt === 'string' || typeof lmt === 'number') {
+                  modified = new Date(lmt).getTime();
+                } else if (typeof lmt === 'object' && lmt.seconds) {
+                  modified = parseInt(lmt.seconds, 10) * 1000;
                 }
               }
-              if (!match) continue;
-            } else {
-               // If no workspace check available, continue
-            }
 
-            // Parse time safely
-            let modified = 0;
-            const lmt = traj.lastModifiedTime;
-            if (lmt) {
-              if (typeof lmt === 'string' || typeof lmt === 'number') {
-                modified = new Date(lmt).getTime();
-              } else if (typeof lmt === 'object' && lmt.seconds) {
-                modified = parseInt(lmt.seconds, 10) * 1000;
+              if (modified && !isNaN(modified) && modified > bestGlobalTime) {
+                bestGlobalTime = modified;
+                bestGlobalId = id;
+                bestGlobalTraj = traj;
+                bestGlobalConn = srv;
               }
             }
-
-            if (modified && !isNaN(modified) && modified > bestGlobalTime) {
-              bestGlobalTime = modified;
-              bestGlobalId = id;
-              bestGlobalTraj = traj;
-              bestGlobalConn = srv;
-            }
-          }
-        } catch (err) {
-          // Ignore failures on individual servers
+          } catch { /* ignore */ }
         }
       }
 
       if (!bestGlobalId || !bestGlobalTraj || !bestGlobalConn) {
         return null;
       }
-
 
       const shortId = bestGlobalId.substring(0, 8);
       logInfo(`Mapped active trajectory ${bestGlobalId} to workspace via port ${bestGlobalConn.port} (last modified: ${new Date(bestGlobalTime).toISOString()})`);
@@ -195,55 +226,55 @@ export class ContextService {
   }
 
 
-  /**
-   * Fetch the latest token data using a multi-source strategy:
-   *
-   * 1. PRIMARY: GetCascadeTrajectorySteps → steps with metadata.modelUsage
-   *    Returns a sliding window of ~1135 steps. The LAST step with modelUsage
-   *    is the freshest live token data available (updates per-turn).
-   *
-   * 2. FALLBACK: GetCascadeTrajectoryGeneratorMetadata → generatorMetadata array
-   *    Lighter but updates in batches (can lag 45+ entries behind).
-   *
-   * 3. METADATA: GetCascadeTrajectory → numTotalSteps/numTotalGM for diagnostics
-   */
   private async fetchLatestTokenInfo(
     connection: ServerConnection,
     cascadeId: string,
   ): Promise<StepTokenInfo | null> {
-    // --- Source 1: Steps modelUsage (freshest) ---
-    const stepsResult = await this.fetchFromStepsModelUsage(connection, cascadeId);
+    // --- Fetch token data ---
+    let stepsResult = await this.fetchFromStepsModelUsage(connection, cascadeId);
+    let gmResult = await this.fetchFromGeneratorMetadata(connection, cascadeId);
 
-    // --- Source 2: GM (fallback if steps has no modelUsage) ---
-    const gmResult = await this.fetchFromGeneratorMetadata(connection, cascadeId);
-
-    // --- Diagnostic: compare sources ---
-    const stepsTotal = stepsResult
-      ? stepsResult.inputTokens + stepsResult.cacheReadTokens + stepsResult.outputTokens
-      : 0;
-    const gmTotal = gmResult
-      ? gmResult.inputTokens + gmResult.cacheReadTokens + gmResult.outputTokens
-      : 0;
-
-    // Also grab numTotalSteps/numTotalGM for diagnostics
+    // Also grab numTotalSteps/numTotalGM for diagnostics and cold start detection
     const trajMeta = await this.rpcCall<Record<string, unknown>>(
       connection,
       '/exa.language_server_pb.LanguageServerService/GetCascadeTrajectory',
       { cascadeId },
       (d) => d,
     );
-    const numTotalSteps = trajMeta?.numTotalSteps ?? '?';
+    const numTotalSteps = (trajMeta?.numTotalSteps as number) || (trajMeta?.stepCount as number) || 0;
     const numTotalGM = trajMeta?.numTotalGeneratorMetadata ?? '?';
     const status = trajMeta?.status ?? '?';
 
-    logDebug(`Sources: steps=${stepsTotal.toLocaleString()} GM=${gmTotal.toLocaleString()} | totalSteps=${numTotalSteps} totalGM=${numTotalGM} status=${status}`);
+    // --- Cold Start Recovery (LoadTrajectory) ---
+    // Triggered if the summary says there is activity, but steps/gm are locally empty
+    const loadKey = `${connection.port}:${cascadeId}`;
+    if (!stepsResult && !gmResult && numTotalSteps > 0 && !this.suppressedLoadTrajectories.has(loadKey)) {
+      logInfo(`Triggering one-shot LoadTrajectory for cold owner LS of ${cascadeId}...`);
+      await this.rpcCall(connection, '/exa.language_server_pb.LanguageServerService/LoadTrajectory', { cascadeId }, d => d);
+      this.suppressedLoadTrajectories.add(loadKey);
+      
+      // Refetch after forcing load
+      stepsResult = await this.fetchFromStepsModelUsage(connection, cascadeId);
+      gmResult = await this.fetchFromGeneratorMetadata(connection, cascadeId);
+    }
 
-    // Pick the freshest source (higher total = more recent context window)
-    if (stepsTotal >= gmTotal && stepsResult) {
-      logDebug(`→ Using Steps modelUsage (fresher by ${(stepsTotal - gmTotal).toLocaleString()})`);
+    const stepsProg = stepsResult?.progressionIndex ?? -1;
+    const gmProg = gmResult?.progressionIndex ?? -1;
+    
+    logDebug(`Sources: Steps(prog=${stepsProg}) GM(prog=${gmProg}) | totalSteps=${numTotalSteps} totalGM=${numTotalGM} status=${status}`);
+
+    // Arbitrate: pick freshest source by progression marker, prefer Steps on tie
+    if (stepsResult && gmResult) {
+      if (stepsProg >= gmProg) {
+        logDebug(`→ Using Steps modelUsage (progression ${stepsProg} >= GM ${gmProg})`);
+        return stepsResult;
+      } else {
+        logDebug(`→ Using GM (progression ${gmProg} > Steps ${stepsProg})`);
+        return gmResult;
+      }
+    } else if (stepsResult) {
       return stepsResult;
     } else if (gmResult) {
-      logDebug(`→ Using GM (fresher by ${(gmTotal - stepsTotal).toLocaleString()})`);
       return gmResult;
     }
 
@@ -291,7 +322,7 @@ export class ContextService {
         `(in=${inputTokens.toLocaleString()} cache=${cacheReadTokens.toLocaleString()} out=${outputTokens.toLocaleString()})`,
       );
 
-      return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider };
+      return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider, progressionIndex: i };
     }
 
     return null;
@@ -332,7 +363,7 @@ export class ContextService {
 
       if (inputTokens === 0 && cacheReadTokens === 0) continue;
 
-      return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider };
+      return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider, progressionIndex: i };
     }
 
     return null;
@@ -387,6 +418,33 @@ export class ContextService {
         if (matchedModel) {
           modelName = matchedModel.displayName;
           contextLimit = matchedModel.maxTokens;
+        }
+
+        // Apply contextLimitOverrides
+        const config = vscode.workspace.getConfiguration('antigravityEngineer');
+        const overrides = config.get<Record<string, number>>('contextLimitOverrides') || {};
+        
+        const rawModelKey = (matchedModel?.id ?? matchedModel?.modelConstant ?? tokenInfo.model).toLowerCase();
+        let overrideFound = false;
+
+        // 1. Precise check for internal canonical key substring
+        for (const [key, limit] of Object.entries(overrides)) {
+          if (rawModelKey.includes(key.toLowerCase())) {
+            contextLimit = limit;
+            overrideFound = true;
+            break;
+          }
+        }
+        
+        // 2. Family alias fallback
+        if (!overrideFound) {
+          const familyKey = modelName.toLowerCase();
+          for (const [key, limit] of Object.entries(overrides)) {
+            if (familyKey.includes(key.toLowerCase())) {
+              contextLimit = limit;
+              break;
+            }
+          }
         }
       }
     }
