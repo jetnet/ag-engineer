@@ -104,7 +104,7 @@ export class ContextService {
       const { discoverAllLanguageServers } = require('../platform/discovery');
       const serversToTry = await discoverAllLanguageServers(connection.host);
       // Ensure the default connection is in the list just in case
-      if (!serversToTry.some(s => s.port === connection.port)) {
+      if (!serversToTry.some((s: any) => s.port === connection.port)) {
         serversToTry.push(connection);
       }
 
