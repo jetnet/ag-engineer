@@ -5,8 +5,8 @@ VS Code extension for Google Antigravity IDE that monitors **context window usag
 ## Features
 
 ### 📊 Context Window Monitor
-- **Real token data** from trajectory steps (not estimates)
-- `inputTokens + cacheReadTokens` = actual context window usage
+- **Actual token data** from server-computed `estimatedTokensUsed`
+- `inputTokens + cacheReadTokens` = full cached and uncached sizes
 - Visual progress bar showing context fill percentage
 - Automatic model detection from `apiProvider` field
 - Workspace-aware: only shows data for the current project
@@ -51,10 +51,11 @@ sequenceDiagram
     loop Every 30s (configurable)
         Ext->>LS: GetUserStatus
         LS-->>Ext: Quotas, plan, credits
-        Ext->>LS: GetAllCascadeTrajectories
-        LS-->>Ext: Active conversation (by workspace)
-        Ext->>LS: GetCascadeTrajectorySteps (last 30)
-        LS-->>Ext: Real token data (input, cache, output)
+        Ext->>LS: GetBrowserOpenConversation / GetAllCascadeTrajectories
+        LS-->>Ext: Active conversation & Owner LS resolution
+        Ext->>Owner_LS: LoadTrajectory (cold fallback)
+        Ext->>Owner_LS: GetCascadeTrajectorySteps / GM
+        Owner_LS-->>Ext: Authoritative token data
         Ext->>UI: Update display
     end
 ```

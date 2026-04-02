@@ -3,27 +3,16 @@
 ## [0.3.0] — 2026-04-02
 
 ### Changed
-- **Context tracking: multi-source strategy for live token data**
-  - Primary source: `GetCascadeTrajectorySteps` → `steps[].metadata.modelUsage`
-    (returns a sliding ~1135-step window; last step with modelUsage is freshest)
-  - Fallback source: `GetCascadeTrajectoryGeneratorMetadata` → `generatorMetadata[].chatModel.usage`
-    (batch-updated, can lag 45+ entries / 50K+ tokens behind)
-  - Diagnostic: `GetCascadeTrajectory` → `numTotalSteps`/`numTotalGM` for source comparison
-  - Compares totals from both sources, picks the freshest automatically
-
-### Added
-- **Multi-LS discovery**: discovers ALL `language_server` processes with `--workspace_id` logging
-  - Antigravity spawns one LS per workspace; cascades may live on any LS
-  - Logs all LS instances with workspace IDs for diagnostics
-  - Prioritizes workspace-matched LS, falls back to first HTTP responder
-- Diagnostic log: `Sources: steps=153K GM=101K | totalSteps=2037 totalGM=620`
-- `StreamAgentStateUpdates` research findings documented in ARCHITECTURE.md
+- **Context tracking: authoritative LS routing & monotonic fallback**
+  - Uses `GetBrowserOpenConversation` to discover the active chat ID correctly instead of relying solely on workspace limits
+  - Routes per-conversation RPC calls strictly via the **owner** Language Server processes
+  - Employs authoritative `estimatedTokensUsed` calculation provided by the `contextWindowMetadata` 
+  - Abandoned the flawed "higher total = fresher" heuristic in favor of a monotonic step-index fallback strategy between `GetCascadeTrajectorySteps` and `GetCascadeTrajectoryGeneratorMetadata`
 
 ### Fixed
-- **51K+ token accuracy gap**: Steps modelUsage returns 153K while GM was stuck at 101K
-  for the same conversation — multi-source strategy eliminates this discrepancy
-- Discovery no longer blindly picks the first LS process (previously connected to
-  wrong workspace's LS, returning stale data from a different project)
+- Workspace ID encoding in the discovery engine correctly handles explicit `-` symbols.
+- Added `LoadTrajectory` fallback for recovering frozen cold conversations prior to querying for tokens.
+- Extension no longer attaches to a global LS connection that returns stale context upon Chat switch and UI reload.
 
 ### Discovered (API behavior)
 - **Multi-LS**: Each workspace gets its own LS process with independent in-memory trajectory forks

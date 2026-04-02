@@ -101,29 +101,82 @@ export class ContextService {
    */
   async fetchContext(connection: ServerConnection): Promise<ContextSnapshot | null> {
     try {
-      // 1. Get all trajectories to find the active conversation
-      const trajectories = await this.rpcCall(
-        connection,
-        GET_TRAJECTORIES_PATH,
-        {},
-        (data) => (data.trajectorySummaries as Record<string, TrajectorySummary>) || null,
-      );
-      if (!trajectories) return null;
+      const { discoverAllLanguageServers } = require('../platform/discovery');
+      const serversToTry = await discoverAllLanguageServers(connection.host);
+      // Ensure the default connection is in the list just in case
+      if (!serversToTry.some(s => s.port === connection.port)) {
+        serversToTry.push(connection);
+      }
 
-      // 2. Find the active trajectory (current workspace or most recent)
-      const { id: cascadeId, traj: activeTraj } = this.findActiveTrajectory(trajectories);
-      if (!cascadeId || !activeTraj) return null;
+      // We will find the absolute freshest trajectory that matches this workspace
+      let bestGlobalId = '';
+      let bestGlobalTraj = null;
+      let bestGlobalConn = null;
+      let bestGlobalTime = 0;
 
-      this.activeConversationId = cascadeId;
-      const shortId = cascadeId.substring(0, 8);
+      for (const srv of serversToTry) {
+        try {
+          const trajectories = await this.rpcCall(
+            srv,
+            '/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories',
+            {},
+            (data) => (data.trajectorySummaries as Record<string, any>) || null,
+          );
+          if (!trajectories) continue;
 
-      // 3. Fetch live trajectory data (uses GetCascadeTrajectory which
-      //    returns up-to-date steps, unlike GetCascadeTrajectorySteps)
-      logDebug(`Fetching live trajectory for ${shortId}…`);
-      const tokenInfo = await this.fetchLatestTokenInfo(connection, cascadeId);
+          for (const [id, traj] of Object.entries(trajectories)) {
+            // Must belong to this workspace
+            if (this.workspaceUris.length > 0 && traj.workspaces) {
+              let match = false;
+              for (const ws of traj.workspaces) {
+                const uri = ws.workspaceFolderAbsoluteUri || '';
+                if (this.workspaceUris.some((u) => uri.includes(u) || u.includes(uri))) {
+                  match = true;
+                  break;
+                }
+              }
+              if (!match) continue;
+            } else {
+               // If no workspace check available, continue
+            }
 
-      // 4. Build snapshot
-      const snapshot = this.buildSnapshot(cascadeId, activeTraj, tokenInfo);
+            // Parse time safely
+            let modified = 0;
+            const lmt = traj.lastModifiedTime;
+            if (lmt) {
+              if (typeof lmt === 'string' || typeof lmt === 'number') {
+                modified = new Date(lmt).getTime();
+              } else if (typeof lmt === 'object' && lmt.seconds) {
+                modified = parseInt(lmt.seconds, 10) * 1000;
+              }
+            }
+
+            if (modified && !isNaN(modified) && modified > bestGlobalTime) {
+              bestGlobalTime = modified;
+              bestGlobalId = id;
+              bestGlobalTraj = traj;
+              bestGlobalConn = srv;
+            }
+          }
+        } catch (err) {
+          // Ignore failures on individual servers
+        }
+      }
+
+      if (!bestGlobalId || !bestGlobalTraj || !bestGlobalConn) {
+        return null;
+      }
+
+      this.activeConversationId = bestGlobalId;
+      const shortId = bestGlobalId.substring(0, 8);
+      logInfo(`Mapped active trajectory ${bestGlobalId} to workspace via port ${bestGlobalConn.port} (last modified: ${new Date(bestGlobalTime).toISOString()})`);
+
+      // Fetch live trajectory data
+      logDebug(`Fetching live trajectory for ${shortId} via owner port ${bestGlobalConn.port}…`);
+      const tokenInfo = await this.fetchLatestTokenInfo(bestGlobalConn, bestGlobalId);
+
+      // Build snapshot
+      const snapshot = this.buildSnapshot(bestGlobalId, bestGlobalTraj, tokenInfo);
       this.lastSnapshot = snapshot;
 
       // Track history
@@ -145,49 +198,10 @@ export class ContextService {
     }
   }
 
-  /**
-   * Find the active trajectory matching the CURRENT workspace only.
-   * Returns empty if no trajectory matches — we don't show stale data from other projects.
-   */
+  // findActiveTrajectory is no longer needed but we can stub it out
   private findActiveTrajectory(
-    trajectories: Record<string, TrajectorySummary>,
-  ): { id?: string; traj?: TrajectorySummary } {
-    let workspaceMatchId: string | undefined;
-    let workspaceMatchTraj: TrajectorySummary | undefined;
-    let workspaceMatchTime = 0;
-    let matchCount = 0;
-
-    for (const [id, traj] of Object.entries(trajectories)) {
-      const modified = new Date(traj.lastModifiedTime || 0).getTime();
-
-      // Only consider trajectories that match this workspace
-      if (this.workspaceUris.length > 0 && traj.workspaces) {
-        for (const ws of traj.workspaces) {
-          const uri = ws.workspaceFolderAbsoluteUri || '';
-          if (this.workspaceUris.some((u) => uri.includes(u) || u.includes(uri))) {
-            matchCount++;
-            if (modified > workspaceMatchTime) {
-              workspaceMatchId = id;
-              workspaceMatchTraj = traj;
-              workspaceMatchTime = modified;
-            }
-          }
-        }
-      }
-    }
-
-    if (workspaceMatchId && workspaceMatchTraj) {
-      const shortId = workspaceMatchId.substring(0, 8);
-      const steps = workspaceMatchTraj.stepCount || 0;
-      const status = workspaceMatchTraj.status || 'unknown';
-      if (matchCount > 1) {
-        logDebug(`Trajectory: ${shortId}… (${matchCount} matched, steps=${steps}, status=${status})`);
-      }
-      return { id: workspaceMatchId, traj: workspaceMatchTraj };
-    }
-
-    // No workspace match — don't fallback to another project
-    logDebug(`No trajectory found for current workspace (${Object.keys(trajectories).length} total, ${this.workspaceUris.join(', ')})`);
+    trajectories: Record<string, any>,
+  ): { id?: string; traj?: any } {
     return {};
   }
 

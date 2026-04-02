@@ -72,7 +72,7 @@ flowchart TD
     S1 --> CMP{Compare totals}
     S2 --> CMP
     S3 -->|diagnostic| LOG[Debug Log]
-    CMP -->|"Pick higher total<br/>(= more recent)"| RESULT[StepTokenInfo]
+    CMP -->|"Compare step index<br/>(monotonic fallback)"| RESULT[StepTokenInfo]
     RESULT --> SNAP[ContextSnapshot]
 
     subgraph UI
@@ -184,16 +184,17 @@ Walking backwards from the last step gives the **freshest available token counts
 - Alphabetically sorted model list for stable UI
 
 ### Context Service (`services/context.ts`)
-- **Step 1**: `GetAllCascadeTrajectories` → find conversation matching current workspace URIs
-- **Step 2**: Multi-source token fetch:
+- **Step 1**: Discover all language servers to route requests accurately.
+- **Step 2**: Resolve active conversation via `GetBrowserOpenConversation`, sticky memory, or workspace matched trajectories via `GetAllCascadeTrajectories`.
+- **Step 3**: Optional `LoadTrajectory` fallback on the owner LS for recovering cold conversations.
+- **Step 4**: Multi-source token fetch via owner LS:
   - Source 1: `GetCascadeTrajectorySteps` → last step with `metadata.modelUsage`
   - Source 2: `GetCascadeTrajectoryGeneratorMetadata` → last GM entry with token data
   - Source 3: `GetCascadeTrajectory` → `numTotalSteps`/`numTotalGM` for diagnostics
-- **Step 3**: Compare source totals, pick the **freshest** (highest total = most recent context)
-- **Step 4**: Extract `inputTokens + cacheReadTokens + outputTokens` = context window usage
-- Model detection via `apiProvider` → display name mapping
-- Context limits from Model Registry (`maxTokens` per model)
-- **No estimation fallback** — only shows real data, empty if no conversation exists for workspace
+- **Step 5**: Compare sources via monotonic step index fallback (picks by progression, not totals).
+- **Step 6**: Read server-computed `estimatedTokensUsed` as authoritative context window usage.
+- Model detection via `apiProvider` → display name mapping.
+- Context limits from Model Registry (`maxTokens` per model).
 
 ### Model Registry (`services/model-registry.ts`)
 - Reads `~/.antigravity_cockpit/cache/quota_api_v1_plugin/authorized/*.json`

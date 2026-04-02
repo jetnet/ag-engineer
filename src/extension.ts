@@ -133,6 +133,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           connectionStatus: 'connected',
           discoveredPort: connection.port,
           discoveredPid: connection.pid,
+          discoveredWorkspaceId: connection.workspaceId,
         });
       }
 

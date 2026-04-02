@@ -84,7 +84,7 @@ export async function discoverLanguageServer(host: string): Promise<ServerConnec
     }
 
     // Step 2: Try workspace-matched first, then others
-    const wsId = 'file_' + currentWs.replace(/\//g, '_').replace(/^_/, '');
+    const wsId = 'file_' + currentWs.replace(/[/\-]/g, '_').replace(/^_/, '');
     const sorted = [...candidates].sort((a, b) => {
       const aMatch = a.workspaceId === wsId ? 0 : 1;
       const bMatch = b.workspaceId === wsId ? 0 : 1;
@@ -103,7 +103,7 @@ export async function discoverLanguageServer(host: string): Promise<ServerConnec
         const ok = await httpProbe(host, port, candidate.csrfToken);
         if (ok) {
           logSuccess(`Connected to LS on port ${port} (PID: ${candidate.pid}, ws: ${candidate.workspaceId})`);
-          return { host, port, csrfToken: candidate.csrfToken, pid: candidate.pid };
+          return { host, port, csrfToken: candidate.csrfToken, pid: candidate.pid, workspaceId: candidate.workspaceId };
         }
       }
     }
@@ -134,16 +134,18 @@ export async function discoverAllLanguageServers(host: string): Promise<ServerCo
     for (const line of lines) {
       const pidMatch = line.match(/^\s*(\d+)/);
       const csrfMatch = line.match(CSRF_REGEX);
+      const wsMatch = line.match(WORKSPACE_ID_REGEX);
       if (!pidMatch || !csrfMatch) continue;
 
       const pid = parseInt(pidMatch[1], 10);
       const csrfToken = csrfMatch[1];
+      const workspaceId = wsMatch?.[1] || 'unknown';
       const ports = await getListeningPorts(pid);
 
       for (const port of ports) {
         const ok = await httpProbe(host, port, csrfToken);
         if (ok) {
-          connections.push({ host, port, csrfToken, pid });
+          connections.push({ host, port, csrfToken, pid, workspaceId });
           break; // One HTTP port per PID is enough
         }
       }
@@ -217,7 +219,9 @@ function httpProbe(host: string, port: number, csrfToken: string): Promise<boole
     );
 
     req.on('error', (err) => {
-      logDebug(`Port ${port}: ${err.message}`);
+      if (err.message !== 'socket hang up' && !err.message.includes('ECONNREFUSED')) {
+        logDebug(`Port ${port}: ${err.message}`);
+      }
       resolve(false);
     });
 
