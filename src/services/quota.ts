@@ -33,6 +33,14 @@ export class QuotaService {
     return this.lastSnapshot;
   }
 
+  /** Resolve a model constant (e.g. MODEL_PLACEHOLDER_M47) to its display label. */
+  getModelLabelById(modelId: string): string | undefined {
+    if (!this.lastSnapshot) return undefined;
+    const lc = modelId.toLowerCase();
+    const found = this.lastSnapshot.models.find(m => m.modelId.toLowerCase() === lc);
+    return found?.label;
+  }
+
   /**
    * Fetch and normalize quota data from the language server.
    */
@@ -121,6 +129,11 @@ export class QuotaService {
     const modelConfigs = (cascadeData?.clientModelConfigs || []) as Array<Record<string, unknown>>;
 
     logDebug(`Found ${modelConfigs.length} model config(s)`);
+    for (const m of modelConfigs) {
+      const ma = m.modelOrAlias as Record<string, unknown> | undefined;
+      const mid = String(ma?.model || m.modelId || '');
+      logDebug(`  config: label="${m.label}" modelId="${mid}"`);
+    }
 
     const models: ModelQuota[] = modelConfigs
       .filter((m) => m.quotaInfo || m.label)

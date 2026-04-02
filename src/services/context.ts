@@ -13,17 +13,19 @@
  * usage.  It updates with every agent turn and includes system prompt,
  * conversation history, active context items, and chat messages.
  *
- * v0.3.8 — Multi-LS stabilization:
- *  - Collect-and-rank Pass 1 (PPID → workspace → freshness → stepCount)
+ * v0.3.10 — Architecture cleanup:
+ *  - Collect-and-rank Pass 1 (workspace → freshness → stepCount)
  *  - Owner-resolution Pass 2 (pick LS with highest progressionIndex)
  *  - Owner caching (skip full multi-LS scan when cache is still valid)
  *  - estimatedTokensUsed from contextWindowMetadata
  *  - Deterministic override matching (exact > longest substring)
  *  - bestGlobalTime fix for Pass 1
+ *  - LoadTrajectory only fires after owner resolution (no side-effect probing)
  */
 import type { ContextSnapshot, ContextUpdateCallback, ServerConnection } from '../types';
 import { logDebug, logInfo, logWarning } from '../logging/logger';
 import type { ModelRegistry } from './model-registry';
+import type { QuotaService } from './quota';
 import * as http from 'http';
 import * as vscode from 'vscode';
 
@@ -78,7 +80,6 @@ interface OpenCandidate {
   srv: ServerConnection;
   cascadeId: string;
   traj: TrajectorySummary | null;
-  ppidMatch: boolean;
   workspaceMatch: boolean;
   modified: number;
   stepCount: number;
@@ -97,6 +98,7 @@ export class ContextService {
   private tokenHistory: Array<{ timestamp: Date; total: number }> = [];
   private readonly maxHistory = 100;
   private modelRegistry: ModelRegistry | null = null;
+  private quotaService: QuotaService | null = null;
   private suppressedLoadTrajectories = new Set<string>();
 
   /** Workspace URIs to match against trajectories */
@@ -111,6 +113,10 @@ export class ContextService {
 
   setModelRegistry(registry: ModelRegistry): void {
     this.modelRegistry = registry;
+  }
+
+  setQuotaService(service: QuotaService): void {
+    this.quotaService = service;
   }
 
   setWorkspaceUris(uris: string[]): void {
@@ -155,8 +161,6 @@ export class ContextService {
           );
           if (resp && resp.cascadeId) {
             const cascadeId = resp.cascadeId as string;
-            const ppidMatch = typeof srv.ppid === 'number' && srv.ppid === process.pid;  // §C-1
-
             // Fetch trajectory summary for scoring (workspace, modified, stepCount)
             let traj: TrajectorySummary | null = null;
             let workspaceMatch = false;
@@ -179,15 +183,14 @@ export class ContextService {
               traj = { status: 'RUNNING' };
             }
 
-            openCandidates.push({ srv, cascadeId, traj, ppidMatch, workspaceMatch, modified, stepCount });
+            openCandidates.push({ srv, cascadeId, traj, workspaceMatch, modified, stepCount });
           }
         } catch { /* ignore */ }
       }
 
-      // Score and sort candidates: PPID > workspace > modified > stepCount
+      // Score and sort candidates: workspace > modified > stepCount
       if (openCandidates.length > 0) {
         openCandidates.sort((a, b) => {
-          if (a.ppidMatch !== b.ppidMatch) return a.ppidMatch ? -1 : 1;
           if (a.workspaceMatch !== b.workspaceMatch) return a.workspaceMatch ? -1 : 1;
           if (a.modified !== b.modified) return b.modified - a.modified;
           return b.stepCount - a.stepCount;
@@ -201,7 +204,7 @@ export class ContextService {
 
         if (openCandidates.length > 1) {
           logDebug(`Pass 1: ${openCandidates.length} candidates — winner port=${winner.srv.port} ` +
-            `ppid=${winner.ppidMatch} ws=${winner.workspaceMatch} modified=${new Date(winner.modified).toISOString()}`);
+            `ws=${winner.workspaceMatch} modified=${new Date(winner.modified).toISOString()}`);
         }
       }
 
@@ -257,7 +260,7 @@ export class ContextService {
       const quickResults = await Promise.all(
         Array.from(candidatesToCheck).map(async (srv) => ({
           srv,
-          info: await this.fetchLatestTokenInfo(srv, bestGlobalId),
+          info: await this.fetchLatestTokenInfo(srv, bestGlobalId, false),
         }))
       );
 
@@ -289,7 +292,7 @@ export class ContextService {
         const ownerCandidates = await Promise.all(
           serversToTry.map(async (srv) => ({
             srv,
-            info: await this.fetchLatestTokenInfo(srv, bestGlobalId),
+            info: await this.fetchLatestTokenInfo(srv, bestGlobalId, false),
           }))
         );
 
@@ -306,6 +309,11 @@ export class ContextService {
           // All LS returned empty — keep the discovery winner
           logDebug(`Full scan failed, treating bestGlobalConn port ${bestGlobalConn.port} as fallback owner.`);
         }
+      }
+
+      if (!tokenInfo) {
+        logDebug(`No token info found during owner resolution, trying to load trajectory on winning owner port ${ownerConn.port}...`);
+        tokenInfo = await this.fetchLatestTokenInfo(ownerConn, bestGlobalId, true);
       }
 
       if (tokenInfo) {
@@ -369,6 +377,7 @@ export class ContextService {
   private async fetchLatestTokenInfo(
     connection: ServerConnection,
     cascadeId: string,
+    allowLoadTrajectory: boolean = false
   ): Promise<StepTokenInfo | null> {
     // --- Fetch token data ---
     let stepsResult = await this.fetchFromStepsModelUsage(connection, cascadeId);
@@ -386,9 +395,9 @@ export class ContextService {
     const status = trajMeta?.status ?? '?';
 
     // --- Cold Start Recovery (LoadTrajectory) ---
-    // Triggered if the summary says there is activity, but steps/gm are locally empty
+    // Triggered if steps/gm are locally empty (e.g. trajectory not found)
     const loadKey = `${connection.port}:${cascadeId}`;
-    if (!stepsResult && !gmResult && numTotalSteps > 0 && !this.suppressedLoadTrajectories.has(loadKey)) {
+    if (!stepsResult && !gmResult && allowLoadTrajectory && !this.suppressedLoadTrajectories.has(loadKey)) {
       logInfo(`Triggering one-shot LoadTrajectory for cold owner LS of ${cascadeId}...`);
       await this.rpcCall(connection, '/exa.language_server_pb.LanguageServerService/LoadTrajectory', { cascadeId }, d => d);
       this.suppressedLoadTrajectories.add(loadKey);
@@ -554,32 +563,91 @@ export class ContextService {
       // Use API provider for display name
       modelName = API_PROVIDER_LABELS[tokenInfo.apiProvider] || tokenInfo.model;
 
+      // §C-NEW: Authoritative model name from QuotaService (GetUserStatus RPC)
+      // This directly maps MODEL_PLACEHOLDER_MXX → display label without fuzzy guessing
+      const quotaLabel = this.quotaService?.getModelLabelById(tokenInfo.model);
+      if (quotaLabel) {
+        modelName = quotaLabel;
+        logDebug(`Model resolved via QuotaService: "${tokenInfo.model}" → "${quotaLabel}"`);
+      }
+
       // Look up context limit from model registry
       if (this.modelRegistry) {
+        const tokenModelLC = tokenInfo.model.toLowerCase();
+        logDebug(`Model matching: tokenInfo.model="${tokenInfo.model}" apiProvider="${tokenInfo.apiProvider}"`);
+
+        // 1. Exact registry lookup by ID
         let matchedModel = this.modelRegistry.getModel(tokenInfo.model);
+
+        // 1b. If quota gave us a label, try matching by that label for context limit
+        if (!matchedModel && quotaLabel) {
+          matchedModel = this.modelRegistry.getModel(quotaLabel);
+        }
 
         if (!matchedModel) {
           const chatModels = this.modelRegistry.getChatModels();
-          const tokenModelLC = tokenInfo.model.toLowerCase();
-          
-          matchedModel = chatModels.find((m) => 
-            (m.modelConstant && tokenModelLC.includes(m.modelConstant.toLowerCase())) ||
-            (m.id && tokenModelLC.includes(m.id.toLowerCase()))
+
+          // 2. Exact modelConstant match
+          matchedModel = chatModels.find((m) =>
+            m.modelConstant && m.modelConstant.toLowerCase() === tokenModelLC
           );
 
+          // 3. Bidirectional substring — longest match wins to avoid
+          //    "gemini-2.5-flash" matching when "gemini-3-flash" is available
           if (!matchedModel) {
-            const providerLC = tokenInfo.apiProvider.toLowerCase();
-            // Fallback: match by provider type
-            matchedModel = chatModels.find((m) => {
-              const nameLC = m.displayName.toLowerCase();
-              if (providerLC.includes('anthropic') && nameLC.includes('claude')) return true;
-              if (providerLC.includes('google') && nameLC.includes('gemini')) return true;
-              if (providerLC.includes('openai') && nameLC.includes('gpt')) return true;
-              return false;
-            });
+            const substringMatches = chatModels.filter((m) =>
+              (m.modelConstant && (tokenModelLC.includes(m.modelConstant.toLowerCase()) || m.modelConstant.toLowerCase().includes(tokenModelLC))) ||
+              (m.id && (tokenModelLC.includes(m.id.toLowerCase()) || m.id.toLowerCase().includes(tokenModelLC)))
+            );
+            if (substringMatches.length > 0) {
+              // Priority: 1. Higher version number 2. Longest ID match
+              matchedModel = substringMatches.sort((a, b) => {
+                // Version extraction (e.g. "3.1" -> 3.1)
+                const getVer = (m: any) => {
+                  const match = (m.displayName || m.id || "").match(/(\d+\.?\d*)/);
+                  return match ? parseFloat(match[1]) : 0;
+                };
+                const vA = getVer(a);
+                const vB = getVer(b);
+                if (Math.abs(vA - vB) > 0.01) return vB - vA; // Higher version first
+
+                const aLen = Math.max(a.modelConstant?.length || 0, a.id?.length || 0);
+                const bLen = Math.max(b.modelConstant?.length || 0, b.id?.length || 0);
+                return bLen - aLen;
+              })[0];
+            }
           }
 
-          // Fallback: use highest context model
+          // 4. Provider-type fallback — but pick the FIRST exact provider match,
+          //    not just any model of the same family
+          if (!matchedModel) {
+            const providerLC = tokenInfo.apiProvider.toLowerCase();
+            const providerMatches = chatModels.filter((m) => {
+              if (providerLC.includes('anthropic') && m.apiProvider?.toLowerCase().includes('anthropic')) return true;
+              if (providerLC.includes('google') && m.apiProvider?.toLowerCase().includes('google')) return true;
+              if (providerLC.includes('openai') && m.apiProvider?.toLowerCase().includes('openai')) return true;
+              return false;
+            });
+
+            // Within same provider, pick best match:
+            // 1. Higher version (3.0 > 2.5)
+            // 2. Highest tokens
+            if (providerMatches.length > 0) {
+              matchedModel = providerMatches.sort((a, b) => {
+                const getVer = (m: any) => {
+                  const match = (m.displayName || m.id || "").match(/(\d+\.?\d*)/);
+                  return match ? parseFloat(match[1]) : 0;
+                };
+                const vA = getVer(a);
+                const vB = getVer(b);
+                if (Math.abs(vA - vB) > 0.01) return vB - vA; // Higher version first
+                return b.maxTokens - a.maxTokens;
+              })[0];
+              logDebug(`Model fallback: matched by provider "${providerLC}" → ${matchedModel.displayName}`);
+            }
+          }
+
+          // 5. Last resort: highest context model
           if (!matchedModel) {
             matchedModel = chatModels
               .filter((m) => m.maxTokens > 50_000)
@@ -588,6 +656,7 @@ export class ContextService {
         }
 
         if (matchedModel) {
+          logDebug(`Model resolved: "${matchedModel.displayName}" (id=${matchedModel.id}, const=${matchedModel.modelConstant}, limit=${matchedModel.maxTokens})`);
           modelName = matchedModel.displayName;
           contextLimit = matchedModel.maxTokens;
           canonicalModelKey = (matchedModel.id || matchedModel.modelConstant || tokenInfo.model).toLowerCase();
@@ -628,8 +697,9 @@ export class ContextService {
 
     if (tokenInfo) {
       const estLabel = tokenInfo.estimatedTokensUsed !== undefined ? ` est=${tokenInfo.estimatedTokensUsed.toLocaleString()}` : '';
+      const rawIdLabel = modelName.includes(tokenInfo.model) ? '' : ` [id:${tokenInfo.model}]`;
       logInfo(
-        `Context: ${modelName} — ${totalTokens.toLocaleString()}/${contextLimit.toLocaleString()} ` +
+        `Context: ${modelName}${rawIdLabel} — ${totalTokens.toLocaleString()}/${contextLimit.toLocaleString()} ` +
         `(${usedPct.toFixed(1)}%) [in=${tokenInfo.inputTokens.toLocaleString()} + cache=${tokenInfo.cacheReadTokens.toLocaleString()} + out=${tokenInfo.outputTokens.toLocaleString()}${estLabel}]` +
         (isRunning ? ' 🔴 RUNNING' : ''),
       );

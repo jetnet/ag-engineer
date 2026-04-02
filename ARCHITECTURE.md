@@ -52,6 +52,7 @@ graph TB
 
     QS -->|QuotaSnapshot| SB
     QS -->|QuotaSnapshot| SIDE
+    QS -->|"getModelLabelById()"| CS
     CS -->|ContextSnapshot| SB
     CS -->|ContextSnapshot| SIDE
     MR -->|model limits| CS
@@ -190,6 +191,7 @@ Walking backwards from the last step gives the **freshest available token counts
 - Normalizes prompt/flow credits with percentage calculations
 - Alphabetically sorted model list for stable UI
 - **Cache Hydration**: Responsible for coercing serialized UI snapshot data (like nested `resetTime` properties which stringify as ISO-8601 strings) back into Javascript `Date` objects upon startup.
+- **Model ID Resolution** (v0.3.11): Exposes `getModelLabelById(modelId)` method that resolves internal model constants (e.g. `MODEL_PLACEHOLDER_M47`) to human-readable display labels (e.g. `Gemini 3 Flash`). Used by `ContextService` as the authoritative, zero-cost model name resolution source.
 
 ### Context Service (`services/context.ts`)
 - **Step 1**: Discover all language servers to route requests accurately.
@@ -203,9 +205,11 @@ Walking backwards from the last step gives the **freshest available token counts
   - Source 3: `GetCascadeTrajectory` → `numTotalSteps`/`numTotalGM` for diagnostics
 - **Step 6**: Compare sources via monotonic step index fallback (picks by progression, not totals).
 - **Step 7**: Read server-computed `estimatedTokensUsed` as authoritative context window usage. Fallback: `inputTokens + cacheReadTokens + outputTokens`.
-- **Override matching**: Deterministic — exact match first, then longest substring match.
-- Model detection via `apiProvider` → display name mapping.
-- Context limits from Model Registry (`maxTokens` per model).
+- **Model name resolution** (v0.3.11): Uses a 3-tier strategy:
+  1. **QuotaService lookup** (authoritative): `QuotaService.getModelLabelById(modelId)` resolves internal IDs (e.g. `MODEL_PLACEHOLDER_M47`) to display labels (e.g. `Gemini 3 Flash`) using live `GetUserStatus` RPC data. This is the primary, zero-cost resolution path.
+  2. **ModelRegistry fallback**: Substring matching against Cockpit cache data with version-aware sorting (3.1 > 3.0 > 2.5).
+  3. **Provider fallback**: Last resort — matches by `apiProvider` family (Google, Anthropic, OpenAI), sorted by version then context limit.
+- Context limits from Model Registry (`maxTokens` per model) or QuotaService label matching.
 
 ### Model Registry (`services/model-registry.ts`)
 - Reads `~/.antigravity_cockpit/cache/quota_api_v1_plugin/authorized/*.json`

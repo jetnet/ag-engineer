@@ -1,6 +1,31 @@
 # Changelog
 
+## [0.3.11] — 2026-04-03
+
+### Changed
+- **Authoritative Model Resolution**: Replaced fragile fuzzy model matching with direct lookup via `QuotaService`. The `ContextService` now resolves internal model IDs (e.g. `MODEL_PLACEHOLDER_M47`) to display names (e.g. `Gemini 3 Flash`) by cross-referencing the live `GetUserStatus` RPC response, which already contains the authoritative `modelId → label` mapping. This eliminates version-guessing heuristics and ensures correct model names regardless of server-side ID changes.
+- **QuotaService ↔ ContextService Wiring**: Added `setQuotaService()` dependency injection so `ContextService.buildSnapshot()` can query `QuotaService.getModelLabelById()` as a zero-cost, deterministic first step before any fuzzy matching fallback.
+
+### Fixed
+- **Gemini 3 Flash misidentified as 2.5**: The server returns `MODEL_PLACEHOLDER_M47` in trajectory data, which did not exist in the Cockpit file cache (which uses `MODEL_PLACEHOLDER_M18`). The old fuzzy matching fell through to provider-based fallback and picked `Gemini 2.5 Flash (Thinking)` due to identical context limits. Now resolved authoritatively via live RPC data.
+- **Version-aware provider fallback**: When the QuotaService lookup is unavailable (e.g. first poll before quota data loads), the provider fallback now sorts by version number descending (3.1 > 3.0 > 2.5) before comparing context limits, preventing incorrect model selection.
+
+## [0.3.10] — 2026-04-02
+
+### Changed
+- **Network Optimization**: Replaced default `http.request` behavior with a custom `http.Agent` configured with `keepAlive: true`. This prevents the plugin from establishing a new TCP/IP handshake every polling cycle, significantly reducing CPU overhead during continuous background RPC calls.
+- **Dynamic Version Resolution**: Reworked version injection logic. Replaced the static build-time `require('../package.json')` substitution with robust dynamic resolution using VS Code's native `context.extension.packageJSON.version` API, ensuring the correct version is consistently identified across environments without relying on `esbuild` bundler side-effects.
+
+### Fixed
+- **PPID Context Arbitration Leaks**: Removed legacy `ppidMatch` filtering from local logic inside the `ContextService`. This cleanly hands off window binding logic to heuristics rather than improperly persisting state between the platform module and context aggregation.
+- **LoadTrajectory Side Effects**: Refactored the `fetchLatestTokenInfo` call trace to require a boolean flag before engaging `LoadTrajectory`. This ensures empty queries over fallback Language Server nodes no longer blindly instantiate an in-memory trajectory fork across unintended sibling workspace architectures.
+
+## [0.3.9] — 2026-04-02
+### Fixed
+- **Cold-Start Trajectory Resolution**: Removed a strict total steps check (`numTotalSteps > 0`) that incorrectly prevented `LoadTrajectory` from firing on new VS Code windows. Previously, if the active conversation had not yet been loaded into the newly discovered Language Server's memory, the server returned a "trajectory not found" error, leading to a zero-steps evaluation that locked out the auto-load fallback mechanism; this resulted in silently failing to display context window and model usage data in the Sidebar and Status Bar. Now, `LoadTrajectory` correctly triggers and flawlessly pulls down the cold session, enabling real-time metrics tracking and population of the history chart.
+
 ## [0.3.8] — 2026-04-02
+
 
 ### Fixed
 - **Multi-session owner resolution**: Fixed stale model/token display when switching models or sending messages in a second IDE window. Previously, the owner-cache would lock onto a stale LS port and never pick up the higher-progression LS that was actually serving the new message. Now, on every tick the discovery winner (current active LS for this window) is always queried in parallel with the cached port; whichever has the higher `progressionIndex` wins.

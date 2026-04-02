@@ -21,8 +21,7 @@ import { SidebarProvider } from './ui/sidebar/provider';
 import { registerCommands } from './commands';
 import type { ServerConnection, DiagnosticInfo } from './types';
 
-const { version: EXTENSION_VERSION } = require('../package.json');
-
+// VERSION dynamically read from context in activate()
 let statusBar: StatusBarManager;
 let sidebarProvider: SidebarProvider;
 let quotaService: QuotaService;
@@ -38,7 +37,8 @@ let diagnostics: DiagnosticInfo = {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   initLogger(context);
-  logInfo(`Antigravity Engineer v${EXTENSION_VERSION} activating...`);
+  const extensionVersion = context.extension.packageJSON.version;
+  logInfo(`Antigravity Engineer v${extensionVersion} activating...`);
 
   const config = getConfig();
   setDebugMode(config.debugMode);
@@ -48,6 +48,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   quotaService = new QuotaService();
   contextService = new ContextService();
   contextService.setModelRegistry(modelRegistry);
+  contextService.setQuotaService(quotaService);
 
   // Pass workspace URIs so context service can match trajectories to this window
   const wsUris = (vscode.workspace.workspaceFolders || []).map((f) => f.uri.toString());
@@ -99,7 +100,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   contextService.onUpdate((snapshot) => {
     statusBar.updateContext(snapshot);
-    sidebarProvider.updateContext(snapshot);
+    sidebarProvider.updateContext(snapshot, contextService.getTokenHistory());
   });
 
   modelRegistry.onUpdate((snapshot) => {

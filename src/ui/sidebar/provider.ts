@@ -51,9 +51,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this.postMessage({ type: 'quota', data: this.serializeQuota(snapshot) });
   }
 
-  updateContext(snapshot: ContextSnapshot): void {
+  updateContext(snapshot: ContextSnapshot, history?: Array<{ timestamp: Date; total: number }>): void {
     this.lastContext = snapshot;
     this.postMessage({ type: 'context', data: snapshot });
+    if (history && history.length > 0) {
+      this.postMessage({
+        type: 'contextHistory',
+        data: history.map(h => ({ t: h.timestamp.getTime(), v: h.total })),
+      });
+    }
   }
 
   updateDiagnostics(info: DiagnosticInfo): void {
@@ -247,6 +253,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     .section { margin-bottom: 16px; }
+
+    /* Sparkline chart */
+    .chart-container {
+      margin-top: 8px;
+      padding-top: 6px;
+      border-top: 1px solid var(--border);
+    }
+    .chart-label {
+      font-size: 10px;
+      opacity: 0.5;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      margin-bottom: 4px;
+    }
+    .chart-canvas {
+      width: 100%;
+      height: 48px;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.03);
+    }
+    .chart-time {
+      display: flex;
+      justify-content: space-between;
+      font-size: 9px;
+      opacity: 0.4;
+      margin-top: 2px;
+    }
   </style>
 </head>
 <body>
@@ -311,6 +344,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         <div class="row">
           <span class="label">Used</span>
           <span id="ctx-pct" class="value">—</span>
+        </div>
+        <div class="chart-container" id="chart-section" style="display:none">
+          <div class="chart-label">Context over time</div>
+          <canvas id="sparkline" class="chart-canvas"></canvas>
+          <div class="chart-time">
+            <span id="chart-t0">—</span>
+            <span id="chart-t1">—</span>
+          </div>
         </div>
       </div>
     </div>
@@ -383,6 +424,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         case 'context': renderContext(msg.data); break;
         case 'quota': renderQuota(msg.data); break;
         case 'diagnostics': renderDiagnostics(msg.data); break;
+        case 'contextHistory': renderSparkline(msg.data); break;
       }
     });
 
@@ -413,6 +455,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       document.getElementById('seg-input').style.width = Math.min(inputPct, 100) + '%';
       document.getElementById('seg-cache').style.width = Math.min(cachePct, 100) + '%';
       document.getElementById('seg-output').style.width = Math.min(outputPct, 100) + '%';
+
+      // Capture limit for sparkline Y-axis
+      if (ctx.contextLimit) lastContextLimit = ctx.contextLimit;
     }
 
     function renderQuota(snapshot) {
@@ -474,6 +519,84 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     function show(id) { document.getElementById(id).style.display = 'flex'; }
     function hide(id) { document.getElementById(id).style.display = 'none'; }
     function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    let lastContextLimit = 200000;
+    function renderSparkline(points) {
+      if (!points || points.length < 2) return;
+      const section = document.getElementById('chart-section');
+      section.style.display = 'block';
+
+      const canvas = document.getElementById('sparkline');
+      const rect = canvas.parentElement.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = rect.width;
+      const h = 48;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, w, h);
+
+      const vals = points.map(p => p.v);
+      const maxVal = lastContextLimit || Math.max(...vals);
+      const minVal = 0;
+      const range = maxVal - minVal || 1;
+      const pad = 2;
+      const plotW = w - pad * 2;
+      const plotH = h - pad * 2;
+
+      // Draw limit line (100%)
+      ctx.strokeStyle = 'rgba(244, 67, 54, 0.25)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(pad, pad);
+      ctx.lineTo(pad + plotW, pad);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Build path
+      const step = plotW / (points.length - 1);
+      ctx.beginPath();
+      for (let i = 0; i < points.length; i++) {
+        const x = pad + i * step;
+        const y = pad + plotH - ((vals[i] - minVal) / range) * plotH;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+
+      // Stroke line
+      ctx.strokeStyle = '#00bcd4';
+      ctx.lineWidth = 1.5;
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+
+      // Fill gradient under line
+      const lastX = pad + (points.length - 1) * step;
+      const gradient = ctx.createLinearGradient(0, pad, 0, pad + plotH);
+      gradient.addColorStop(0, 'rgba(0, 188, 212, 0.3)');
+      gradient.addColorStop(1, 'rgba(0, 188, 212, 0.02)');
+      ctx.lineTo(lastX, pad + plotH);
+      ctx.lineTo(pad, pad + plotH);
+      ctx.closePath();
+      ctx.fillStyle = gradient;
+      ctx.fill();
+
+      // Current value dot
+      const lastY = pad + plotH - ((vals[vals.length - 1] - minVal) / range) * plotH;
+      ctx.beginPath();
+      ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#00bcd4';
+      ctx.fill();
+
+      // Time labels
+      const fmtTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      document.getElementById('chart-t0').textContent = fmtTime(points[0].t);
+      document.getElementById('chart-t1').textContent = fmtTime(points[points.length - 1].t);
+    }
   </script>
 </body>
 </html>`;

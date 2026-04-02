@@ -11,15 +11,21 @@
  * - Response: JSON
  */
 import * as http from 'http';
+import * as vscode from 'vscode';
 import { logDebug, logError } from '../logging/logger';
 import type { UserStatusResponse } from '../types';
 
-const { version: EXTENSION_VERSION } = require('../../package.json');
+function getExtensionVersion(): string {
+  return vscode.extensions.getExtension('jetnet.antigravity-engineer')?.packageJSON.version || '0.3.9';
+}
 
 const DEFAULT_TIMEOUT = 10_000;
 const GET_USER_STATUS_PATH = '/exa.language_server_pb.LanguageServerService/GetUserStatus';
 const GET_BROWSER_OPEN_CONVERSATION_PATH = '/exa.language_server_pb.LanguageServerService/GetBrowserOpenConversation';
 const LOAD_TRAJECTORY_PATH = '/exa.language_server_pb.LanguageServerService/LoadTrajectory';
+
+const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 10, timeout: 5000 });
+
 
 interface RpcOptions {
   host: string;
@@ -77,6 +83,7 @@ function makeRequest(
         method: 'POST',
         headers,
         timeout,
+        agent: keepAliveAgent,
       },
       (res) => {
         let data = '';
@@ -125,7 +132,7 @@ export async function rpcProbe(host: string, port: number, csrfToken: string): P
     host,
     port,
     csrfToken,
-    body: { metadata: { ideName: 'antigravity-engineer', ideVersion: EXTENSION_VERSION } },
+    body: { metadata: { ideName: 'antigravity-engineer', ideVersion: getExtensionVersion() } },
     timeout: 5000,
   });
   if (result.success) {
@@ -148,7 +155,7 @@ export async function fetchUserStatus(
     host,
     port,
     csrfToken,
-    body: { metadata: { ideName: 'antigravity-engineer', ideVersion: EXTENSION_VERSION } },
+    body: { metadata: { ideName: 'antigravity-engineer', ideVersion: getExtensionVersion() } },
   });
 
   if (!result.success) {
