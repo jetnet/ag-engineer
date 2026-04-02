@@ -363,22 +363,35 @@ export class ContextService {
 
       // Look up context limit from model registry
       if (this.modelRegistry) {
-        const chatModels = this.modelRegistry.getChatModels();
-        // Match by provider type
-        const providerLC = tokenInfo.apiProvider.toLowerCase();
-        let matchedModel = chatModels.find((m) => {
-          const nameLC = m.displayName.toLowerCase();
-          if (providerLC.includes('anthropic') && nameLC.includes('claude')) return true;
-          if (providerLC.includes('google') && nameLC.includes('gemini')) return true;
-          if (providerLC.includes('openai') && nameLC.includes('gpt')) return true;
-          return false;
-        });
+        let matchedModel = this.modelRegistry.getModel(tokenInfo.model);
 
-        // Fallback: use highest context model matching the provider
         if (!matchedModel) {
-          matchedModel = chatModels
-            .filter((m) => m.maxTokens > 50_000)
-            .sort((a, b) => b.maxTokens - a.maxTokens)[0];
+          const chatModels = this.modelRegistry.getChatModels();
+          const tokenModelLC = tokenInfo.model.toLowerCase();
+          
+          matchedModel = chatModels.find((m) => 
+            (m.modelConstant && tokenModelLC.includes(m.modelConstant.toLowerCase())) ||
+            (m.id && tokenModelLC.includes(m.id.toLowerCase()))
+          );
+
+          if (!matchedModel) {
+            const providerLC = tokenInfo.apiProvider.toLowerCase();
+            // Fallback: match by provider type
+            matchedModel = chatModels.find((m) => {
+              const nameLC = m.displayName.toLowerCase();
+              if (providerLC.includes('anthropic') && nameLC.includes('claude')) return true;
+              if (providerLC.includes('google') && nameLC.includes('gemini')) return true;
+              if (providerLC.includes('openai') && nameLC.includes('gpt')) return true;
+              return false;
+            });
+          }
+
+          // Fallback: use highest context model
+          if (!matchedModel) {
+            matchedModel = chatModels
+              .filter((m) => m.maxTokens > 50_000)
+              .sort((a, b) => b.maxTokens - a.maxTokens)[0];
+          }
         }
 
         if (matchedModel) {
