@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.6] — 2026-04-02
+
+### Changed
+- **Dashboard Initialization & Stability**: Synchronous `WebviewViewProvider` registration immediately satisfies VS Code's activation lifecycle requirements, totally eliminating the 'view is not registered' error.
+- **Cache Resilience**: Implemented rigorous re-hydration of serialized cache objects (particularly `resetTime` to `Date` mapping) in `services/quota.ts` preventing latent crashes during UI state restoration.
+- **Diagnostics**: Significantly reduced log noise. Routine `ECONNREFUSED` connection probes during token fetching or when polling the active browser conversation are securely suppressed.
+- **UI Enhancements**: Updated Sidebar metrics bar colors to better match user preference: Green (new input tokens), Cyan (cached tokens), and Light Purple (output tokens).
+
 ## [0.3.4] — 2026-04-02
 
 ### Changed
@@ -68,3 +76,4 @@
 - Commands: Open Dashboard, Refresh Now, Show Diagnostics, Reset State
 - Output channel logging with structured diagnostics
 - GlobalState caching for instant UI on restart
+

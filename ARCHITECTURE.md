@@ -154,6 +154,11 @@ Walking backwards from the last step gives the **freshest available token counts
 
 ## Module Responsibilities
 
+### Extension Host (`extension.ts`)
+- Governs lifecycle and immediate wiring.
+- **Sync-First Binding**: WebviewViewProvider endpoints and Commands are attached synchronously right at activation (`onView` / `onCommand`). This satisfies VS Code's view lifecycle boundaries, preventing failures if initialization components like `ModelRegistry` act asynchronously.
+- State restoration from `globalState` cache directly passes rehydrated object hierarchies into initializing singletons (like Quota Service and Context Service).
+
 ### Discovery (`platform/discovery.ts`)
 - Scans OS processes for ALL `language_server` instances via `ps aux`
 - Extracts `--csrf_token` and `--workspace_id` from each process
@@ -168,6 +173,7 @@ Walking backwards from the last step gives the **freshest available token counts
 - JSON-over-HTTP POST to `exa.language_server_pb.LanguageServerService/*`
 - CSRF token authentication via `X-Codeium-Csrf-Token` header
 - HTTP only (avoiding HTTPS to prevent conflicts with IDE's internal gRPC)
+- Gracefully handles `ECONNREFUSED` internally to suppress irrelevant or transitional error noise during standard reconnects.
 
 ### Poller (`services/poller.ts`)
 - Non-overlapping setTimeout chain (not setInterval)
@@ -182,6 +188,7 @@ Walking backwards from the last step gives the **freshest available token counts
 - Extracts `userTier.availableCredits` for total AI credits
 - Normalizes prompt/flow credits with percentage calculations
 - Alphabetically sorted model list for stable UI
+- **Cache Hydration**: Responsible for coercing serialized UI snapshot data (like nested `resetTime` properties which stringify as ISO-8601 strings) back into Javascript `Date` objects upon startup.
 
 ### Context Service (`services/context.ts`)
 - **Step 1**: Discover all language servers to route requests accurately.
