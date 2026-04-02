@@ -2,7 +2,7 @@
   "name": "antigravity-engineer",
   "displayName": "Antigravity Engineer",
   "description": "Monitor context window usage, model quotas, and token consumption for Google Antigravity IDE",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "jetnet",
   "license": "MIT",
   "engines": {
@@ -106,7 +106,9 @@
         },
         "antigravityEngineer.statusBar.models": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "markdownDescription": "Which models to show in the status bar quota dots. Use short names: `Opus`, `Sonnet`, `Pro`, `Flash`, `GPT`. Empty = show all."
         },
