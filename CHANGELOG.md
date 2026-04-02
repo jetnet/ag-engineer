@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.8] — 2026-04-02
+
+### Fixed
+- **Multi-session owner resolution**: Fixed stale model/token display when switching models or sending messages in a second IDE window. Previously, the owner-cache would lock onto a stale LS port and never pick up the higher-progression LS that was actually serving the new message. Now, on every tick the discovery winner (current active LS for this window) is always queried in parallel with the cached port; whichever has the higher `progressionIndex` wins.
+- **PPID binding removed**: Removed incorrect PPID-based LS priority. Investigation showed that Language Server processes are forked from `--type=utility` workers (not the Extension Host), so `ls.ppid === process.pid` was always `false`. Discovery now sorts purely by workspace match.
+- **Workspace matching log**: Added `logInfo` diagnostic showing the computed `wsId` and each candidate's `workspaceId` with MATCH/no annotation — makes workspace match failures immediately visible in the output channel.
+
+### Changed
+- **Owner cache strategy**: Cache entry is now only trusted if the current active LS (`bestGlobalConn`) also returns data for the same cascadeId. If the active LS has a higher `progressionIndex` than the cache, the cache is evicted and the active LS takes over immediately. Falls through to a full LS-scan only when neither the cached port nor the active LS can provide data.
+
 ## [0.3.7] — 2026-04-02
 
 ### Added

@@ -31,6 +31,7 @@ const PROBE_PATH = '/exa.language_server_pb.LanguageServerService/GetUserStatus'
 
 interface LSCandidate {
   pid: number;
+  ppid: number;
   csrfToken: string;
   workspaceId: string;
 }
@@ -40,12 +41,12 @@ interface LSCandidate {
  * Returns the first viable connection. Logs all LS instances for diagnostics.
  */
 export async function discoverLanguageServer(host: string): Promise<ServerConnection | null> {
-  logInfo('Starting language server discovery...');
+  logInfo(`Starting language server discovery... [extension host PID=${process.pid}]`);
 
   try {
-    // Step 1: Find ALL LS processes
+    // Step 1: Find ALL LS processes (ppid for window binding)
     const { stdout } = await execAsync(
-      'ps -eo pid,args | grep -v grep | grep language_server | grep csrf_token || true',
+      'ps -eo pid,ppid,args | grep -v grep | grep language_server | grep csrf_token || true',
       { timeout: 5000 },
     );
 
@@ -58,13 +59,14 @@ export async function discoverLanguageServer(host: string): Promise<ServerConnec
     const candidates: LSCandidate[] = [];
 
     for (const line of lines) {
-      const pidMatch = line.match(/^\s*(\d+)/);
+      const pidPpidMatch = line.match(/^\s*(\d+)\s+(\d+)/);
       const csrfMatch = line.match(CSRF_REGEX);
       const wsMatch = line.match(WORKSPACE_ID_REGEX);
 
-      if (pidMatch && csrfMatch) {
+      if (pidPpidMatch && csrfMatch) {
         candidates.push({
-          pid: parseInt(pidMatch[1], 10),
+          pid: parseInt(pidPpidMatch[1], 10),
+          ppid: parseInt(pidPpidMatch[2], 10),
           csrfToken: csrfMatch[1],
           workspaceId: wsMatch?.[1] || 'unknown',
         });
@@ -80,15 +82,16 @@ export async function discoverLanguageServer(host: string): Promise<ServerConnec
     const currentWs = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || 'none';
     logInfo(`Found ${candidates.length} LS instance(s) [current workspace: ${currentWs}]`);
     for (const c of candidates) {
-      logDebug(`  LS PID=${c.pid} workspace_id=${c.workspaceId} csrf=${c.csrfToken.substring(0, 8)}…`);
+      logDebug(`  LS PID=${c.pid} PPID=${c.ppid} workspace_id=${c.workspaceId} csrf=${c.csrfToken.substring(0, 8)}… ppidMatch=${c.ppid === process.pid}`);
     }
 
-    // Step 2: Try workspace-matched first, then others
+    // Step 2: Prioritize: workspace match > others (PPID removed — LS parent is utility process, not Extension Host)
     const wsId = 'file_' + currentWs.replace(/[/\-]/g, '_').replace(/^_/, '');
+    logInfo(`Workspace matching: wsId="${wsId}" | candidates: ${candidates.map(c => `${c.workspaceId}(${c.workspaceId === wsId ? 'MATCH' : 'no'})`).join(', ')}`);
     const sorted = [...candidates].sort((a, b) => {
-      const aMatch = a.workspaceId === wsId ? 0 : 1;
-      const bMatch = b.workspaceId === wsId ? 0 : 1;
-      return aMatch - bMatch;
+      const aWs = a.workspaceId === wsId ? 0 : 1;
+      const bWs = b.workspaceId === wsId ? 0 : 1;
+      return aWs - bWs;
     });
 
     // Step 3: Probe all candidates, return first that responds
@@ -103,7 +106,7 @@ export async function discoverLanguageServer(host: string): Promise<ServerConnec
         const ok = await httpProbe(host, port, candidate.csrfToken);
         if (ok) {
           logSuccess(`Connected to LS on port ${port} (PID: ${candidate.pid}, ws: ${candidate.workspaceId})`);
-          return { host, port, csrfToken: candidate.csrfToken, pid: candidate.pid, workspaceId: candidate.workspaceId };
+          return { host, port, csrfToken: candidate.csrfToken, pid: candidate.pid, ppid: candidate.ppid, workspaceId: candidate.workspaceId };
         }
       }
     }
@@ -125,19 +128,20 @@ export async function discoverAllLanguageServers(host: string): Promise<ServerCo
 
   try {
     const { stdout } = await execAsync(
-      'ps -eo pid,args | grep -v grep | grep language_server | grep csrf_token || true',
+      'ps -eo pid,ppid,args | grep -v grep | grep language_server | grep csrf_token || true',
       { timeout: 5000 },
     );
     if (!stdout?.trim()) return connections;
 
     const lines = stdout.trim().split('\n');
     for (const line of lines) {
-      const pidMatch = line.match(/^\s*(\d+)/);
+      const pidPpidMatch = line.match(/^\s*(\d+)\s+(\d+)/);
       const csrfMatch = line.match(CSRF_REGEX);
       const wsMatch = line.match(WORKSPACE_ID_REGEX);
-      if (!pidMatch || !csrfMatch) continue;
+      if (!pidPpidMatch || !csrfMatch) continue;
 
-      const pid = parseInt(pidMatch[1], 10);
+      const pid = parseInt(pidPpidMatch[1], 10);
+      const ppid = parseInt(pidPpidMatch[2], 10);
       const csrfToken = csrfMatch[1];
       const workspaceId = wsMatch?.[1] || 'unknown';
       const ports = await getListeningPorts(pid);
@@ -145,7 +149,7 @@ export async function discoverAllLanguageServers(host: string): Promise<ServerCo
       for (const port of ports) {
         const ok = await httpProbe(host, port, csrfToken);
         if (ok) {
-          connections.push({ host, port, csrfToken, pid, workspaceId });
+          connections.push({ host, port, csrfToken, pid, ppid, workspaceId });
           break; // One HTTP port per PID is enough
         }
       }

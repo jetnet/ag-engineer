@@ -12,6 +12,14 @@
  * `estimatedTokensUsed` is the authoritative, server-computed context window
  * usage.  It updates with every agent turn and includes system prompt,
  * conversation history, active context items, and chat messages.
+ *
+ * v0.3.8 — Multi-LS stabilization:
+ *  - Collect-and-rank Pass 1 (PPID → workspace → freshness → stepCount)
+ *  - Owner-resolution Pass 2 (pick LS with highest progressionIndex)
+ *  - Owner caching (skip full multi-LS scan when cache is still valid)
+ *  - estimatedTokensUsed from contextWindowMetadata
+ *  - Deterministic override matching (exact > longest substring)
+ *  - bestGlobalTime fix for Pass 1
  */
 import type { ContextSnapshot, ContextUpdateCallback, ServerConnection } from '../types';
 import { logDebug, logInfo, logWarning } from '../logging/logger';
@@ -65,6 +73,24 @@ interface TokenBreakdownGroup {
   children?: TokenBreakdownGroup[];
 }
 
+/** Candidate from Pass 1 (GetBrowserOpenConversation) collect-and-rank §C-3 */
+interface OpenCandidate {
+  srv: ServerConnection;
+  cascadeId: string;
+  traj: TrajectorySummary | null;
+  ppidMatch: boolean;
+  workspaceMatch: boolean;
+  modified: number;
+  stepCount: number;
+}
+
+/** Owner cache entry §C-7 */
+interface OwnerCacheEntry {
+  port: number;
+  csrfToken: string;
+  lastProgression: number;
+}
+
 export class ContextService {
   private lastSnapshot: ContextSnapshot | null = null;
   private updateCallbacks: ContextUpdateCallback[] = [];
@@ -75,6 +101,9 @@ export class ContextService {
 
   /** Workspace URIs to match against trajectories */
   private workspaceUris: string[] = [];
+
+  /** Owner cache: cascadeId → {port, lastProgression} §C-7 */
+  private ownerCache = new Map<string, OwnerCacheEntry>();
 
   onUpdate(cb: ContextUpdateCallback): void {
     this.updateCallbacks.push(cb);
@@ -102,18 +131,20 @@ export class ContextService {
   async fetchContext(connection: ServerConnection): Promise<ContextSnapshot | null> {
     try {
       const { discoverAllLanguageServers } = require('../platform/discovery');
-      const serversToTry = await discoverAllLanguageServers(connection.host);
+      const serversToTry: ServerConnection[] = await discoverAllLanguageServers(connection.host);
       // Ensure the default connection is in the list just in case
-      if (!serversToTry.some((s: any) => s.port === connection.port)) {
+      if (!serversToTry.some((s: ServerConnection) => s.port === connection.port)) {
         serversToTry.push(connection);
       }
 
       let bestGlobalId = '';
-      let bestGlobalTraj: any = null;
+      let bestGlobalTraj: TrajectorySummary | null = null;
       let bestGlobalConn: ServerConnection | null = null;
       let bestGlobalTime = 0;
 
-      // Pass 1: Try GetBrowserOpenConversation to find the definitive active chat
+      // ─── Pass 1: Collect-and-rank via GetBrowserOpenConversation §C-3 ───
+      // Instead of breaking on the first responder, collect ALL candidates and score them.
+      const openCandidates: OpenCandidate[] = [];
       for (const srv of serversToTry) {
         try {
           const resp = await this.rpcCall<Record<string, any>>(
@@ -123,28 +154,58 @@ export class ContextService {
             (d) => d
           );
           if (resp && resp.cascadeId) {
-            bestGlobalId = resp.cascadeId;
-            bestGlobalConn = srv;
-            
-            // Get trajectory summary for status, stepCount, etc.
+            const cascadeId = resp.cascadeId as string;
+            const ppidMatch = typeof srv.ppid === 'number' && srv.ppid === process.pid;  // §C-1
+
+            // Fetch trajectory summary for scoring (workspace, modified, stepCount)
+            let traj: TrajectorySummary | null = null;
+            let workspaceMatch = false;
+            let modified = 0;
+            let stepCount = 0;
+
             const trajMeta = await this.rpcCall<Record<string, any>>(
               srv,
               '/exa.language_server_pb.LanguageServerService/GetCascadeTrajectory',
-              { cascadeId: bestGlobalId },
+              { cascadeId },
               (d) => d
             );
             if (trajMeta) {
-              bestGlobalTraj = trajMeta;
+              traj = trajMeta as TrajectorySummary;
+              stepCount = (trajMeta.numTotalSteps as number) || (trajMeta.stepCount as number) || 0;
+              modified = this.parseModifiedTime(trajMeta.lastModifiedTime);
+              workspaceMatch = this.matchesWorkspace(traj);
             } else {
               // Fallback fake summary if the call fails but we know it's active
-              bestGlobalTraj = { status: 'RUNNING' }; 
+              traj = { status: 'RUNNING' };
             }
-            break;
+
+            openCandidates.push({ srv, cascadeId, traj, ppidMatch, workspaceMatch, modified, stepCount });
           }
         } catch { /* ignore */ }
       }
 
-      // Pass 2: Fallback to GetAllCascadeTrajectories workspace matching if Pass 1 failed
+      // Score and sort candidates: PPID > workspace > modified > stepCount
+      if (openCandidates.length > 0) {
+        openCandidates.sort((a, b) => {
+          if (a.ppidMatch !== b.ppidMatch) return a.ppidMatch ? -1 : 1;
+          if (a.workspaceMatch !== b.workspaceMatch) return a.workspaceMatch ? -1 : 1;
+          if (a.modified !== b.modified) return b.modified - a.modified;
+          return b.stepCount - a.stepCount;
+        });
+
+        const winner = openCandidates[0];
+        bestGlobalId = winner.cascadeId;
+        bestGlobalTraj = winner.traj;
+        bestGlobalConn = winner.srv;
+        bestGlobalTime = winner.modified;  // §C-6: fix 1970-01-01 log
+
+        if (openCandidates.length > 1) {
+          logDebug(`Pass 1: ${openCandidates.length} candidates — winner port=${winner.srv.port} ` +
+            `ppid=${winner.ppidMatch} ws=${winner.workspaceMatch} modified=${new Date(winner.modified).toISOString()}`);
+        }
+      }
+
+      // ─── Pass 2: Fallback to GetAllCascadeTrajectories workspace matching ───
       if (!bestGlobalId || !bestGlobalTraj) {
         for (const srv of serversToTry) {
           try {
@@ -158,26 +219,10 @@ export class ContextService {
 
             for (const [id, traj] of Object.entries(trajectories)) {
               if (this.workspaceUris.length > 0 && traj.workspaces) {
-                let match = false;
-                for (const ws of traj.workspaces) {
-                  const uri = ws.workspaceFolderAbsoluteUri || '';
-                  if (this.workspaceUris.some((u) => uri.includes(u) || u.includes(uri))) {
-                    match = true;
-                    break;
-                  }
-                }
-                if (!match) continue;
+                if (!this.matchesWorkspace(traj)) continue;
               }
 
-              let modified = 0;
-              const lmt = traj.lastModifiedTime;
-              if (lmt) {
-                if (typeof lmt === 'string' || typeof lmt === 'number') {
-                  modified = new Date(lmt).getTime();
-                } else if (typeof lmt === 'object' && lmt.seconds) {
-                  modified = parseInt(lmt.seconds, 10) * 1000;
-                }
-              }
+              const modified = this.parseModifiedTime(traj.lastModifiedTime);
 
               if (modified && !isNaN(modified) && modified > bestGlobalTime) {
                 bestGlobalTime = modified;
@@ -197,31 +242,127 @@ export class ContextService {
       const shortId = bestGlobalId.substring(0, 8);
       logInfo(`Mapped active trajectory ${bestGlobalId} to workspace via port ${bestGlobalConn.port} (last modified: ${new Date(bestGlobalTime).toISOString()})`);
 
-      // Fetch live trajectory data
-      logDebug(`Fetching live trajectory for ${shortId} via owner port ${bestGlobalConn.port}…`);
-      const tokenInfo = await this.fetchLatestTokenInfo(bestGlobalConn, bestGlobalId);
+      // ─── Owner Resolution §C-4 + §C-7 ───
+      let ownerConn = bestGlobalConn;
+      let tokenInfo: StepTokenInfo | null = null;
+      let resolvedProg = -1;
 
-      // Build snapshot
-      const snapshot = this.buildSnapshot(bestGlobalId, bestGlobalTraj, tokenInfo);
-      this.lastSnapshot = snapshot;
+      const cached = this.ownerCache.get(bestGlobalId);
+      const candidatesToCheck = new Set<ServerConnection>([bestGlobalConn]);
+      if (cached) {
+        const cachedSrv = serversToTry.find(s => s.port === cached.port);
+        if (cachedSrv) candidatesToCheck.add(cachedSrv);
+      }
 
-      // Track history
-      if (snapshot.totalTokens > 0) {
-        this.tokenHistory.push({ timestamp: snapshot.timestamp, total: snapshot.totalTokens });
-        if (this.tokenHistory.length > this.maxHistory) {
-          this.tokenHistory.shift();
+      const quickResults = await Promise.all(
+        Array.from(candidatesToCheck).map(async (srv) => ({
+          srv,
+          info: await this.fetchLatestTokenInfo(srv, bestGlobalId),
+        }))
+      );
+
+      const validQuick = quickResults.filter(c => c.info !== null);
+      if (validQuick.length > 0) {
+        const bestQuick = validQuick.sort((a, b) => (b.info!.progressionIndex ?? -1) - (a.info!.progressionIndex ?? -1))[0];
+        const prog = bestQuick.info!.progressionIndex ?? -1;
+
+        if (!cached || prog >= cached.lastProgression) {
+          ownerConn = bestQuick.srv;
+          tokenInfo = bestQuick.info;
+          resolvedProg = prog;
+          if (cached && ownerConn.port === cached.port) {
+            logDebug(`Owner cache hit: port=${ownerConn.port} prog=${prog}`);
+          } else {
+            logDebug(`Owner switch: from ${cached?.port} to ${ownerConn.port} prog=${prog}`);
+          }
+        } else {
+          logDebug(`Owner cache invalidated: best prog=${prog} < lastProg=${cached.lastProgression}`);
+          this.ownerCache.delete(bestGlobalId);
+        }
+      } else if (cached) {
+        logDebug(`Owner cache invalidated: neither bestGlobal nor cached returned data`);
+        this.ownerCache.delete(bestGlobalId);
+      }
+
+      if (!tokenInfo) {
+        // Full owner-resolution scan: pick LS with highest progressionIndex §C-4
+        const ownerCandidates = await Promise.all(
+          serversToTry.map(async (srv) => ({
+            srv,
+            info: await this.fetchLatestTokenInfo(srv, bestGlobalId),
+          }))
+        );
+
+        const freshestOwner = ownerCandidates
+          .filter(c => c.info !== null)
+          .sort((a, b) => (b.info!.progressionIndex ?? -1) - (a.info!.progressionIndex ?? -1))[0];
+
+        if (freshestOwner) {
+          ownerConn = freshestOwner.srv;
+          tokenInfo = freshestOwner.info;
+          resolvedProg = tokenInfo?.progressionIndex ?? -1;
+          logDebug(`Owner resolution fallthrough: port=${ownerConn.port} prog=${resolvedProg} (from ${ownerCandidates.filter(c => c.info).length} repsonding LS)`);
+        } else {
+          // All LS returned empty — keep the discovery winner
+          logDebug(`Full scan failed, treating bestGlobalConn port ${bestGlobalConn.port} as fallback owner.`);
         }
       }
 
-      for (const cb of this.updateCallbacks) {
-        try { cb(snapshot); } catch { /* swallow */ }
+      if (tokenInfo) {
+        // Update cache §C-7
+        this.ownerCache.set(bestGlobalId, { port: ownerConn.port, csrfToken: ownerConn.csrfToken, lastProgression: resolvedProg });
       }
 
-      return snapshot;
+      // Build snapshot
+      const snapshot = this.buildSnapshot(bestGlobalId, bestGlobalTraj, tokenInfo);
+      return this.finishSnapshot(snapshot);
     } catch (err) {
       logWarning(`Context fetch error: ${err instanceof Error ? err.message : String(err)}`);
       return null;
     }
+  }
+
+  /** Parse lastModifiedTime from any format (string, number, {seconds}) */
+  private parseModifiedTime(lmt: unknown): number {
+    if (!lmt) return 0;
+    if (typeof lmt === 'string' || typeof lmt === 'number') {
+      return new Date(lmt).getTime();
+    }
+    if (typeof lmt === 'object' && lmt !== null && 'seconds' in lmt) {
+      return parseInt(String((lmt as Record<string, unknown>).seconds), 10) * 1000;
+    }
+    return 0;
+  }
+
+  /** Check if a trajectory summary matches this window's workspace URIs */
+  private matchesWorkspace(traj: TrajectorySummary): boolean {
+    if (this.workspaceUris.length === 0 || !traj.workspaces) return false;
+    for (const ws of traj.workspaces) {
+      const uri = ws.workspaceFolderAbsoluteUri || '';
+      if (this.workspaceUris.some((u) => uri.includes(u) || u.includes(uri))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Common post-processing: store snapshot, update history, fire callbacks */
+  private finishSnapshot(snapshot: ContextSnapshot): ContextSnapshot {
+    this.lastSnapshot = snapshot;
+
+    // Track history
+    if (snapshot.totalTokens > 0) {
+      this.tokenHistory.push({ timestamp: snapshot.timestamp, total: snapshot.totalTokens });
+      if (this.tokenHistory.length > this.maxHistory) {
+        this.tokenHistory.shift();
+      }
+    }
+
+    for (const cb of this.updateCallbacks) {
+      try { cb(snapshot); } catch { /* swallow */ }
+    }
+
+    return snapshot;
   }
 
 
@@ -266,6 +407,11 @@ export class ContextService {
     if (stepsResult && gmResult) {
       if (stepsProg >= gmProg) {
         logDebug(`→ Using Steps modelUsage (progression ${stepsProg} >= GM ${gmProg})`);
+        // Merge estimatedTokensUsed from GM if Steps doesn't have it §C-5
+        if (!stepsResult.estimatedTokensUsed && gmResult.estimatedTokensUsed) {
+          stepsResult.estimatedTokensUsed = gmResult.estimatedTokensUsed;
+          stepsResult.tokenBreakdown = gmResult.tokenBreakdown;
+        }
         return stepsResult;
       } else {
         logDebug(`→ Using GM (progression ${gmProg} > Steps ${stepsProg})`);
@@ -332,6 +478,7 @@ export class ContextService {
 
   /**
    * Fetch token data from GeneratorMetadata API (batch-updated, may lag).
+   * §C-5: Also extracts estimatedTokensUsed + tokenBreakdown from contextWindowMetadata.
    */
   private async fetchFromGeneratorMetadata(
     connection: ServerConnection,
@@ -365,12 +512,29 @@ export class ContextService {
 
       if (inputTokens === 0 && cacheReadTokens === 0) continue;
 
+      // §C-5: Extract estimatedTokensUsed + tokenBreakdown from contextWindowMetadata
+      const cwm = chatModel?.contextWindowMetadata as Record<string, unknown> | undefined;
+      let estimatedTokensUsed: number | undefined;
+      if (cwm) {
+        if (typeof cwm.estimatedTokensUsed === 'number') {
+          estimatedTokensUsed = cwm.estimatedTokensUsed;
+        } else if (typeof cwm.estimatedTokensUsed === 'string') {
+          const parsed = parseInt(cwm.estimatedTokensUsed, 10);
+          if (!isNaN(parsed)) estimatedTokensUsed = parsed;
+        }
+      }
+      const tokenBreakdown = cwm?.tokenBreakdown as TokenBreakdown | undefined;
+
       const stepIndices = gmArray[i].stepIndices as number[] | undefined;
       const progIndex = Array.isArray(stepIndices) && stepIndices.length > 0
         ? Math.max(...stepIndices)
         : i;
 
-      return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider, progressionIndex: progIndex };
+      if (estimatedTokensUsed !== undefined) {
+        logDebug(`GM[${i}]: estimatedTokensUsed=${estimatedTokensUsed.toLocaleString()}`);
+      }
+
+      return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider, estimatedTokensUsed, tokenBreakdown, progressionIndex: progIndex };
     }
 
     return null;
@@ -431,10 +595,18 @@ export class ContextService {
           canonicalModelKey = tokenInfo.model.toLowerCase();
         }
         
-        // Apply overrides based on the canonical key
+        // §C-2: Deterministic override matching — exact > longest substring
         const overrides = require('../config/settings').getConfig().contextLimitOverrides;
         if (overrides) {
-          const overrideKey = Object.keys(overrides).find(k => canonicalModelKey.includes(k.toLowerCase()));
+          const keys = Object.keys(overrides);
+          // Try exact match first
+          let overrideKey = keys.find(k => canonicalModelKey === k.toLowerCase());
+          if (!overrideKey) {
+            // Fallback: longest substring match
+            overrideKey = keys
+              .filter(k => canonicalModelKey.includes(k.toLowerCase()))
+              .sort((a, b) => b.length - a.length)[0];
+          }
           if (overrideKey && typeof overrides[overrideKey] === 'number') {
             contextLimit = overrides[overrideKey];
           }
@@ -442,22 +614,23 @@ export class ContextService {
       }
     }
 
-    // Token data
+    // Token data — §C-5: prefer server-authoritative estimatedTokensUsed
     const isEstimated = !tokenInfo;
     const rawInput = tokenInfo ? tokenInfo.inputTokens : 0;
     const cacheRead = tokenInfo ? tokenInfo.cacheReadTokens : 0;
     const inputTokens = rawInput + cacheRead;
     const outputTokens = tokenInfo ? tokenInfo.outputTokens : 0;
-    const totalTokens = inputTokens + outputTokens;
+    const totalTokens = tokenInfo?.estimatedTokensUsed ?? (inputTokens + outputTokens);
     const usedPct = contextLimit > 0 ? (totalTokens / contextLimit) * 100 : 0;
 
     const status = traj.status || '';
     const isRunning = status.includes('RUNNING');
 
     if (tokenInfo) {
+      const estLabel = tokenInfo.estimatedTokensUsed !== undefined ? ` est=${tokenInfo.estimatedTokensUsed.toLocaleString()}` : '';
       logInfo(
         `Context: ${modelName} — ${totalTokens.toLocaleString()}/${contextLimit.toLocaleString()} ` +
-        `(${usedPct.toFixed(1)}%) [in=${tokenInfo.inputTokens.toLocaleString()} + cache=${tokenInfo.cacheReadTokens.toLocaleString()} + out=${tokenInfo.outputTokens.toLocaleString()}]` +
+        `(${usedPct.toFixed(1)}%) [in=${tokenInfo.inputTokens.toLocaleString()} + cache=${tokenInfo.cacheReadTokens.toLocaleString()} + out=${tokenInfo.outputTokens.toLocaleString()}${estLabel}]` +
         (isRunning ? ' 🔴 RUNNING' : ''),
       );
     }

@@ -11,6 +11,7 @@ export interface ServerConnection {
   csrfToken: string;
   workspaceId?: string;
   pid: number;
+  ppid?: number;
 }
 
 export interface ProcessCandidate {

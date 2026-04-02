@@ -102,8 +102,12 @@ All settings are prefixed with `antigravityEngineer.`
 | Endpoint | Purpose | Key Fields |
 |---|---|---|
 | `GetUserStatus` | Quotas, plan, credits | `userTier`, `planStatus`, `cascadeModelConfigData` |
-| `GetAllCascadeTrajectories` | Find active conversation | `trajectorySummaries[id].workspaces`, `stepCount` |
-| `GetCascadeTrajectorySteps` | Real token counts | `inputTokens`, `cacheReadTokens`, `outputTokens`, `apiProvider` |
+| `GetBrowserOpenConversation` | Active chat detection (Pass 1) | `cascadeId` |
+| `GetAllCascadeTrajectories` | Active chat fallback (Pass 2) | `trajectorySummaries[id].workspaces`, `stepCount` |
+| `GetCascadeTrajectory` | Trajectory summary, step/GM counts | `numTotalSteps`, `numTotalGM`, `status` |
+| `GetCascadeTrajectorySteps` | Primary token source | `inputTokens`, `cacheReadTokens`, `outputTokens`, `apiProvider` |
+| `GetCascadeTrajectoryGeneratorMetadata` | Fallback token source + `estimatedTokensUsed` | `chatModel.usage`, `chatModel.contextWindowMetadata` |
+| `LoadTrajectory` | Cold start recovery | `cascadeId` |
 
 ## Privacy & Security
 

@@ -84,17 +84,17 @@ flowchart TD
 ### Multi-LS Architecture
 
 Antigravity spawns **one Language Server per workspace**. Each LS has its own:
-- PID, CSRF token, workspace_id
+- PID, PPID, CSRF token, workspace_id
 - HTTP port (JSON-RPC), HTTPS port (gRPC), extension port
 - In-memory trajectory fork after `LoadTrajectory`
 
 **Critical**: A cascade/conversation may be loaded on ANY LS — not necessarily the one matching the current VS Code workspace. Per-conversation reads must be routed through the LS that owns the data, which may differ from the workspace-matched LS.
 
-Discovery logs all LS instances with workspace IDs for diagnostics:
+**Workspace-based priority** (v0.3.8): Discovery sorts LS candidates by `workspace_id` match against the current VS Code workspace path. Each IDE window runs its own Extension Host; since LS processes are children of `--type=utility` workers (not Extension Hosts directly), PPID matching is not reliable and was removed.
+
+Discovery logs the computed `wsId` and each candidate with MATCH/no annotation:
 ```
-Found 2 LS instance(s) [current workspace: /home/user/project-A]
-  LS PID=12345 workspace_id=file_home_user_project_B csrf=e4b06aaa…
-  LS PID=67890 workspace_id=file_home_user_project_A csrf=b982aa40…
+Workspace matching: wsId="file_home_user_project_A" | candidates: file_home_user_project_A(MATCH), file_home_user_project_B(no)
 ```
 
 ### LS RPC Endpoints — API Reference
@@ -132,10 +132,11 @@ Walking backwards from the last step gives the **freshest available token counts
 
 #### Token Formula
 
-**Context window usage** = `inputTokens + cacheReadTokens + outputTokens`
+**Context window usage** = `estimatedTokensUsed ?? (inputTokens + cacheReadTokens + outputTokens)`
 
-> `inputTokens` is the *uncached* portion; `cacheReadTokens` is the *cached* portion.
-> Together they represent the full input sent to the model. Both occupy context window space.
+> When available, `estimatedTokensUsed` from `chatModel.contextWindowMetadata` is the authoritative server-computed value.
+> Fallback: `inputTokens` (uncached) + `cacheReadTokens` (cached) + `outputTokens`.
+> Both input components occupy context window space.
 
 ### API Behavior Notes
 
@@ -160,14 +161,14 @@ Walking backwards from the last step gives the **freshest available token counts
 - State restoration from `globalState` cache directly passes rehydrated object hierarchies into initializing singletons (like Quota Service and Context Service).
 
 ### Discovery (`platform/discovery.ts`)
-- Scans OS processes for ALL `language_server` instances via `ps aux`
-- Extracts `--csrf_token` and `--workspace_id` from each process
-- Logs all LS instances with workspace IDs for diagnostics
+- Scans OS processes for ALL `language_server` instances via `ps -eo pid,ppid,args`
+- Extracts `--csrf_token`, `--workspace_id`, and `ppid` from each process
+- Logs all LS instances with workspace IDs and PPID match status
 - Prioritizes workspace-matched LS, falls back to first responder
 - Discovers listening ports via `ss -tlnp` (Linux) matched by PID
 - Probes each port with HTTP POST to `GetUserStatus` to find the JSON-RPC port
 - Filters out gRPC/HTTPS ports (only HTTP works without cert conflicts)
-- Extracts `ServerConnection { host, port, csrfToken, pid }`
+- Extracts `ServerConnection { host, port, csrfToken, pid, ppid }`
 
 ### RPC Client (`platform/rpc-client.ts`)
 - JSON-over-HTTP POST to `exa.language_server_pb.LanguageServerService/*`
@@ -192,14 +193,17 @@ Walking backwards from the last step gives the **freshest available token counts
 
 ### Context Service (`services/context.ts`)
 - **Step 1**: Discover all language servers to route requests accurately.
-- **Step 2**: Resolve active conversation via `GetBrowserOpenConversation`, sticky memory, or workspace matched trajectories via `GetAllCascadeTrajectories`.
-- **Step 3**: Optional `LoadTrajectory` fallback on the owner LS for recovering cold conversations.
-- **Step 4**: Multi-source token fetch via owner LS:
+- **Step 2 (Pass 1)**: Collect-and-rank active conversations via `GetBrowserOpenConversation` across ALL LS instances. Score by: workspace match → last modified time → step count. No early `break` — the highest-scoring candidate wins.
+- **Step 2 (Pass 2 fallback)**: If Pass 1 returns nothing, fall through to `GetAllCascadeTrajectories` workspace matching (unchanged).
+- **Step 3 (Owner Resolution)**: After selecting `cascadeId`, concurrently query both the `bestGlobalConn` (active window LS) and the cached port (if any). The candidate with the higher `progressionIndex` wins. If the active LS exceeds the cached progression, the cache is immediately evicted and replaced. Falls through to a full LS-scan only when neither candidate responds. Cache stored as `ownerCache` (Map<cascadeId, {port, lastProgression}>).
+- **Step 4**: Optional `LoadTrajectory` fallback on the owner LS for recovering cold conversations.
+- **Step 5**: Multi-source token fetch via owner LS:
   - Source 1: `GetCascadeTrajectorySteps` → last step with `metadata.modelUsage`
-  - Source 2: `GetCascadeTrajectoryGeneratorMetadata` → last GM entry with token data
+  - Source 2: `GetCascadeTrajectoryGeneratorMetadata` → last GM entry with token data + `contextWindowMetadata.estimatedTokensUsed`
   - Source 3: `GetCascadeTrajectory` → `numTotalSteps`/`numTotalGM` for diagnostics
-- **Step 5**: Compare sources via monotonic step index fallback (picks by progression, not totals).
-- **Step 6**: Read server-computed `estimatedTokensUsed` as authoritative context window usage.
+- **Step 6**: Compare sources via monotonic step index fallback (picks by progression, not totals).
+- **Step 7**: Read server-computed `estimatedTokensUsed` as authoritative context window usage. Fallback: `inputTokens + cacheReadTokens + outputTokens`.
+- **Override matching**: Deterministic — exact match first, then longest substring match.
 - Model detection via `apiProvider` → display name mapping.
 - Context limits from Model Registry (`maxTokens` per model).
 
@@ -257,5 +261,5 @@ graph LR
 
 1. **Batch-updated data**: Both Steps and GM sources update in batches (not per-turn). Token counts may lag a few turns behind the actual context window state.
 2. **No per-turn push**: `StreamAgentStateUpdates` only sends an initial snapshot during IDLE. Delta frames during RUNNING are not yet confirmed/implemented.
-3. **Multi-LS routing**: A cascade may be loaded on a different LS than the workspace-matched one. Current discovery probes all LS instances but doesn't guarantee routing to the cascade owner.
+3. **Multi-LS routing**: Addressed in v0.3.8 via workspace-based discovery sorting + concurrent live+cache owner resolution. Each poll concurrently checks both the active-window LS and the cached LS; the one with the higher `progressionIndex` wins, so model/token display updates immediately after any new message without waiting for a cache eviction timeout.
 4. **Sliding window**: Steps API returns ~1135 steps. For very long conversations, older steps fall out of the window.
