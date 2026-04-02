@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.7] — 2026-04-02
+
+### Added
+- **Context Limit Overrides**: Fully integrated `contextLimitOverrides` into the snapshots. Overrides correctly match on the internal canonical model key (e.g., `claude-sonnet`) and take precedence over default registry token limits.
+
 ## [0.3.6] — 2026-04-02
 
 ### Changed

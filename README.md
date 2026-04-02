@@ -72,7 +72,7 @@ npm run build
 npm run package
 
 # Install in Antigravity
-antigravity --install-extension antigravity-engineer-0.3.6.vsix
+antigravity --install-extension antigravity-engineer-0.3.7.vsix
 ```
 
 ### From source (development)
