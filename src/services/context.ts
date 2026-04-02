@@ -18,8 +18,6 @@ import { logDebug, logInfo, logWarning } from '../logging/logger';
 import type { ModelRegistry } from './model-registry';
 import * as http from 'http';
 
-const GET_TRAJECTORIES_PATH =
-  '/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories';
 
 /** Model placeholder → display name mapping (from apiProvider) */
 const API_PROVIDER_LABELS: Record<string, string> = {
@@ -70,11 +68,9 @@ export class ContextService {
   private tokenHistory: Array<{ timestamp: Date; total: number }> = [];
   private readonly maxHistory = 100;
   private modelRegistry: ModelRegistry | null = null;
-  private activeConversationId: string | undefined;
+
   /** Workspace URIs to match against trajectories */
   private workspaceUris: string[] = [];
-  /** High-water mark: last known step index for incremental polling */
-  private lastKnownStepIndex = 0;
 
   onUpdate(cb: ContextUpdateCallback): void {
     this.updateCallbacks.push(cb);
@@ -167,7 +163,7 @@ export class ContextService {
         return null;
       }
 
-      this.activeConversationId = bestGlobalId;
+
       const shortId = bestGlobalId.substring(0, 8);
       logInfo(`Mapped active trajectory ${bestGlobalId} to workspace via port ${bestGlobalConn.port} (last modified: ${new Date(bestGlobalTime).toISOString()})`);
 
@@ -198,12 +194,6 @@ export class ContextService {
     }
   }
 
-  // findActiveTrajectory is no longer needed but we can stub it out
-  private findActiveTrajectory(
-    trajectories: Record<string, any>,
-  ): { id?: string; traj?: any } {
-    return {};
-  }
 
   /**
    * Fetch the latest token data using a multi-source strategy:

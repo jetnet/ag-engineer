@@ -171,13 +171,6 @@ export class StatusBarManager {
     return lines.join('\n');
   }
 
-  private getHealthIcon(): string {
-    if (this.diagnosticInfo.connectionStatus !== 'connected') return '$(plug)';
-    if (this.lastContext?.usedPercentage && this.lastContext.usedPercentage >= 80) return '$(warning)';
-    if (this.lastQuota?.models.some((m) => m.isCritical)) return '$(warning)';
-    return '$(pulse)';
-  }
-
   private shortenModelName(name: string): string {
     const map: Record<string, string> = {
       'claude opus': 'Opus',

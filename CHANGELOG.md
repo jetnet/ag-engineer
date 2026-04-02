@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.4] — 2026-04-02
+
+### Changed
+- **Housekeeping**: Removed dead code, unused variables, and stale functions left over from initial iterative development (such as the legacy `findActiveTrajectory` matcher).
+- Typescript build strictly passes with no unused locals or parameters.
+
 ## [0.3.0] — 2026-04-02
 
 ### Changed

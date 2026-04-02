@@ -4,7 +4,6 @@
  * Emits update events for UI consumption.
  */
 import type {
-  ClientModelConfig,
   CreditsInfo,
   ModelQuota,
   QuotaSnapshot,

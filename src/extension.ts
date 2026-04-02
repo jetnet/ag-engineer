@@ -9,7 +9,7 @@
  * 3. Deactivate: stop pollers, cleanup
  */
 import * as vscode from 'vscode';
-import { initLogger, logInfo, logSuccess, logError, logWarning, setDebugMode } from './logging/logger';
+import { initLogger, logInfo, logSuccess, logWarning, setDebugMode } from './logging/logger';
 import { getConfig, onConfigChange } from './config/settings';
 import { discoverLanguageServer } from './platform/discovery';
 import { QuotaService } from './services/quota';
