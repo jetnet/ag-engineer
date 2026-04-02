@@ -116,9 +116,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       --error: var(--vscode-errorForeground, #f44);
       --warning: var(--vscode-editorWarning-foreground, #fa0);
       --success: #4caf50;
-      --clr-input: #36b5a0;
-      --clr-cache: #5ec4d4;
-      --clr-output: #b07cd8;
+      --clr-input: #4caf50;
+      --clr-cache: #00bcd4;
+      --clr-output: #d0b3ff;
       --clr-remaining: rgba(255,255,255,0.08);
       --input-bg: var(--vscode-input-background);
       --button-bg: var(--vscode-button-background);

@@ -20,7 +20,9 @@
   ],
   "icon": "icon.png",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onView:antigravityEngineer.dashboard",
+    "onCommand:antigravityEngineer.openDashboard"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -83,16 +85,6 @@
           "minimum": 1,
           "maximum": 50,
           "description": "Show critical warning when model quota drops below this percentage"
-        },
-        "antigravityEngineer.contextLimitOverrides": {
-          "type": "object",
-          "default": {
-            "gemini-2.5-flash": 1048576,
-            "gemini-3.0-pro": 2097152,
-            "claude-3-5-sonnet": 200000,
-            "claude-3-7-sonnet": 200000
-          },
-          "description": "Overrides for max tokens based on model internal key matching"
         },
         "antigravityEngineer.serverHost": {
           "type": "string",

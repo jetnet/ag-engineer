@@ -43,13 +43,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const config = getConfig();
   setDebugMode(config.debugMode);
 
-  // === Model Registry (from cockpit cache) ===
+  // === Services (Sync Init) ===
   modelRegistry = new ModelRegistry();
-  await modelRegistry.load();
-  modelRegistry.startWatching();
-  context.subscriptions.push({ dispose: () => modelRegistry.stopWatching() });
-
-  // === Services ===
   quotaService = new QuotaService();
   contextService = new ContextService();
   contextService.setModelRegistry(modelRegistry);
@@ -58,7 +53,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const wsUris = (vscode.workspace.workspaceFolders || []).map((f) => f.uri.toString());
   contextService.setWorkspaceUris(wsUris);
 
-  // === UI ===
+  // === UI (Sync Init) ===
   statusBar = new StatusBarManager();
   context.subscriptions.push({ dispose: () => statusBar.dispose() });
 
@@ -70,11 +65,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ),
   );
 
+  // === Async Init ===
+  await modelRegistry.load();
+  modelRegistry.startWatching();
+  context.subscriptions.push({ dispose: () => modelRegistry.stopWatching() });
+
   // === Bootstrap UI from Cache ===
   const cachedQuota = context.globalState.get<any>('lastQuotaSnapshot');
   if (cachedQuota && cachedQuota.timestamp) {
     try {
-      const restored = { ...cachedQuota, timestamp: new Date(cachedQuota.timestamp) };
+      const restored = {
+        ...cachedQuota,
+        timestamp: new Date(cachedQuota.timestamp),
+        models: (cachedQuota.models || []).map((m: any) => ({
+          ...m,
+          resetTime: m.resetTime ? new Date(m.resetTime) : null,
+        }))
+      };
       statusBar.updateQuota(restored);
       sidebarProvider.updateQuota(restored);
     } catch { /* ignore cache errors */ }

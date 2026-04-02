@@ -46,24 +46,6 @@ export function getConfig(): ExtensionConfig {
   };
 }
 
-/**
- * Resolve context limit for a model label.
- * Priority: user override > known defaults > fallback 200K.
- */
-export function resolveContextLimit(modelLabel: string, overrides: Record<string, number>): number {
-  // Check exact match in user overrides
-  const lower = modelLabel.toLowerCase();
-  for (const [key, val] of Object.entries(overrides)) {
-    if (lower.includes(key.toLowerCase())) return val;
-  }
-  // Check known defaults
-  for (const [key, val] of Object.entries(DEFAULT_CONTEXT_LIMITS)) {
-    if (lower.includes(key)) return val;
-  }
-  // Conservative fallback
-  return 200_000;
-}
-
 export function onConfigChange(callback: (cfg: ExtensionConfig) => void): vscode.Disposable {
   return vscode.workspace.onDidChangeConfiguration((e) => {
     if (e.affectsConfiguration(SECTION)) {

@@ -146,7 +146,6 @@ export class ContextService {
 
       // Pass 2: Fallback to GetAllCascadeTrajectories workspace matching if Pass 1 failed
       if (!bestGlobalId || !bestGlobalTraj) {
-        logDebug('No open browser conversation found; falling back to workspace trajectory matching...');
         for (const srv of serversToTry) {
           try {
             const trajectories = await this.rpcCall(
@@ -317,12 +316,15 @@ export class ContextService {
       const apiProvider = String(mu.apiProvider || '');
       const contextTotal = inputTokens + cacheReadTokens + outputTokens;
 
+      const stepInfo = meta?.sourceTrajectoryStepInfo as Record<string, unknown> | undefined;
+      const progIndex = typeof stepInfo?.stepIndex === 'number' ? stepInfo.stepIndex : i;
+
       logDebug(
         `Steps[${i}/${steps.length}]: context=${contextTotal.toLocaleString()} ` +
         `(in=${inputTokens.toLocaleString()} cache=${cacheReadTokens.toLocaleString()} out=${outputTokens.toLocaleString()})`,
       );
 
-      return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider, progressionIndex: i };
+      return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider, progressionIndex: progIndex };
     }
 
     return null;
@@ -363,7 +365,12 @@ export class ContextService {
 
       if (inputTokens === 0 && cacheReadTokens === 0) continue;
 
-      return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider, progressionIndex: i };
+      const stepIndices = gmArray[i].stepIndices as number[] | undefined;
+      const progIndex = Array.isArray(stepIndices) && stepIndices.length > 0
+        ? Math.max(...stepIndices)
+        : i;
+
+      return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider, progressionIndex: progIndex };
     }
 
     return null;
@@ -418,33 +425,6 @@ export class ContextService {
         if (matchedModel) {
           modelName = matchedModel.displayName;
           contextLimit = matchedModel.maxTokens;
-        }
-
-        // Apply contextLimitOverrides
-        const config = vscode.workspace.getConfiguration('antigravityEngineer');
-        const overrides = config.get<Record<string, number>>('contextLimitOverrides') || {};
-        
-        const rawModelKey = (matchedModel?.id ?? matchedModel?.modelConstant ?? tokenInfo.model).toLowerCase();
-        let overrideFound = false;
-
-        // 1. Precise check for internal canonical key substring
-        for (const [key, limit] of Object.entries(overrides)) {
-          if (rawModelKey.includes(key.toLowerCase())) {
-            contextLimit = limit;
-            overrideFound = true;
-            break;
-          }
-        }
-        
-        // 2. Family alias fallback
-        if (!overrideFound) {
-          const familyKey = modelName.toLowerCase();
-          for (const [key, limit] of Object.entries(overrides)) {
-            if (familyKey.includes(key.toLowerCase())) {
-              contextLimit = limit;
-              break;
-            }
-          }
         }
       }
     }
@@ -515,8 +495,10 @@ export class ContextService {
             try {
               const parsed = JSON.parse(data);
               if (parsed.code && parsed.message) {
-                // RPC error
-                logDebug(`RPC error on ${path}: ${parsed.message}`);
+                // Ignore "no browser open conversation request found" since it's a normal fallback condition
+                if (!parsed.message.includes('no browser open conversation')) {
+                  logDebug(`RPC error on ${path}: ${parsed.message}`);
+                }
                 resolve(null);
                 return;
               }
