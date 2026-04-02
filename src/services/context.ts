@@ -384,6 +384,7 @@ export class ContextService {
     // Determine model name and context limit
     let modelName = 'Unknown';
     let contextLimit = 200_000;
+    let canonicalModelKey = '';
 
     if (tokenInfo) {
       // Use API provider for display name
@@ -425,6 +426,18 @@ export class ContextService {
         if (matchedModel) {
           modelName = matchedModel.displayName;
           contextLimit = matchedModel.maxTokens;
+          canonicalModelKey = (matchedModel.id || matchedModel.modelConstant || tokenInfo.model).toLowerCase();
+        } else {
+          canonicalModelKey = tokenInfo.model.toLowerCase();
+        }
+        
+        // Apply overrides based on the canonical key
+        const overrides = require('../config/settings').getConfig().contextLimitOverrides;
+        if (overrides) {
+          const overrideKey = Object.keys(overrides).find(k => canonicalModelKey.includes(k.toLowerCase()));
+          if (overrideKey && typeof overrides[overrideKey] === 'number') {
+            contextLimit = overrides[overrideKey];
+          }
         }
       }
     }

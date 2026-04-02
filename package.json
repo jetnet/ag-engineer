@@ -86,6 +86,11 @@
           "maximum": 50,
           "description": "Show critical warning when model quota drops below this percentage"
         },
+        "antigravityEngineer.contextLimitOverrides": {
+          "type": "object",
+          "default": {},
+          "description": "JSON object mapping internal model identifiers (e.g. 'claude-sonnet') to custom token limits"
+        },
         "antigravityEngineer.serverHost": {
           "type": "string",
           "default": "127.0.0.1",
