@@ -4,6 +4,10 @@
   "description": "Monitor context window usage, model quotas, and token consumption for Google Antigravity IDE",
   "version": "0.3.11",
   "publisher": "jetnet",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jetnet/ag-engineer.git"
+  },
   "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
@@ -18,7 +22,7 @@
     "quota",
     "monitor"
   ],
-  "icon": "icon.png",
+  "icon": "resources/icon.png",
   "activationEvents": [
     "onStartupFinished",
     "onView:antigravityEngineer.dashboard",
@@ -49,7 +53,7 @@
         {
           "id": "antigravity-engineer",
           "title": "AG Engineer",
-          "icon": "icon.svg"
+          "icon": "resources/icon.svg"
         }
       ]
     },

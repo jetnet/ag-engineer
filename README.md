@@ -1,6 +1,10 @@
 # Antigravity Engineer
 
+![Antigravity Engineer](resources/ag-engineer-icon.png)
+
 VS Code extension for Google Antigravity IDE that monitors **context window usage**, **model quotas**, and **token consumption** in real-time by reverse-engineering the internal language server RPC API.
+
+![Dashboard](resources/dashboard.png)
 
 ## Features
 
