@@ -25,7 +25,7 @@ const execAsync = promisify(exec);
 
 // Only match --csrf_token (not --extension_server_csrf_token)
 const CSRF_REGEX = /(?<!extension_server_)--csrf_token[=\s]+(?:["']?)([a-zA-Z0-9\-_.]+)(?:["']?)/;
-const WORKSPACE_ID_REGEX = /--workspace_id\s+(\S+)/;
+const WORKSPACE_ID_REGEX = /--workspace_id[=\s]+(\S+)/;
 
 const PROBE_PATH = '/exa.language_server_pb.LanguageServerService/GetUserStatus';
 

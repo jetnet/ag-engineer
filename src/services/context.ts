@@ -26,7 +26,7 @@ import type { ContextSnapshot, ContextUpdateCallback, ServerConnection } from '.
 import { logDebug, logInfo, logWarning } from '../logging/logger';
 import type { ModelRegistry } from './model-registry';
 import type { QuotaService } from './quota';
-import * as http from 'http';
+import { rpcCall as sharedRpcCall } from '../platform/rpc-client';
 import * as vscode from 'vscode';
 
 
@@ -762,55 +762,40 @@ export class ContextService {
   }
 
   /**
-   * Generic RPC call helper.
+   * Generic RPC call helper — delegates to shared rpc-client.ts transport
+   * which uses keepAlive agent for connection reuse across polls.
    */
-  private rpcCall<T>(
+  private async rpcCall<T>(
     connection: ServerConnection,
     path: string,
     payload: Record<string, unknown>,
     extract: (data: Record<string, unknown>) => T | null,
   ): Promise<T | null> {
-    return new Promise((resolve) => {
-      const body = JSON.stringify(payload);
-      const req = http.request(
-        {
-          hostname: connection.host,
-          port: connection.port,
-          path,
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Codeium-Csrf-Token': connection.csrfToken,
-            'Content-Length': Buffer.byteLength(body),
-          },
-          timeout: 15000,
-        },
-        (res) => {
-          let data = '';
-          res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
-          res.on('end', () => {
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.code && parsed.message) {
-                // Ignore "no browser open conversation request found" since it's a normal fallback condition
-                if (!parsed.message.includes('no browser open conversation')) {
-                  logDebug(`RPC error on ${path}: ${parsed.message}`);
-                }
-                resolve(null);
-                return;
-              }
-              resolve(extract(parsed));
-            } catch {
-              resolve(null);
-            }
-          });
-        },
-      );
-
-      req.on('error', () => resolve(null));
-      req.on('timeout', () => { req.destroy(); resolve(null); });
-      req.write(body);
-      req.end();
+    const result = await sharedRpcCall({
+      host: connection.host,
+      port: connection.port,
+      csrfToken: connection.csrfToken,
+      path,
+      body: payload,
+      timeout: 15000,
     });
+
+    if (!result.success || !result.data) {
+      return null;
+    }
+
+    try {
+      const parsed = result.data as Record<string, unknown>;
+      if (parsed.code && parsed.message) {
+        // Ignore "no browser open conversation request found" — normal fallback condition
+        if (!String(parsed.message).includes('no browser open conversation')) {
+          logDebug(`RPC error on ${path}: ${parsed.message}`);
+        }
+        return null;
+      }
+      return extract(parsed);
+    } catch {
+      return null;
+    }
   }
 }
