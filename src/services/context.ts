@@ -416,10 +416,14 @@ export class ContextService {
     if (stepsResult && gmResult) {
       if (stepsProg >= gmProg) {
         logDebug(`→ Using Steps modelUsage (progression ${stepsProg} >= GM ${gmProg})`);
-        // Merge estimatedTokensUsed from GM if Steps doesn't have it §C-5
-        if (!stepsResult.estimatedTokensUsed && gmResult.estimatedTokensUsed) {
+        // Merge estimatedTokensUsed from GM only if same progression (safe cross-reference)
+        // When Steps is ahead of GM, the GM estimate belongs to an older turn and would be stale
+        if (!stepsResult.estimatedTokensUsed && gmResult.estimatedTokensUsed && gmProg === stepsProg) {
           stepsResult.estimatedTokensUsed = gmResult.estimatedTokensUsed;
           stepsResult.tokenBreakdown = gmResult.tokenBreakdown;
+          logDebug(`  Merged GM estimate (same prog=${gmProg}): ${gmResult.estimatedTokensUsed.toLocaleString()}`);
+        } else if (!stepsResult.estimatedTokensUsed && gmResult.estimatedTokensUsed) {
+          logDebug(`  Skipped stale GM estimate (gmProg=${gmProg} < stepsProg=${stepsProg})`);
         }
         return stepsResult;
       } else {
@@ -684,12 +688,16 @@ export class ContextService {
     }
 
     // Token data — §C-5: prefer server-authoritative estimatedTokensUsed
-    const isEstimated = !tokenInfo;
+    const hasAuthoritativeTotal = tokenInfo?.estimatedTokensUsed !== undefined;
+    const isEstimated = !hasAuthoritativeTotal;
     const rawInput = tokenInfo ? tokenInfo.inputTokens : 0;
     const cacheRead = tokenInfo ? tokenInfo.cacheReadTokens : 0;
     const inputTokens = rawInput + cacheRead;
     const outputTokens = tokenInfo ? tokenInfo.outputTokens : 0;
     const totalTokens = tokenInfo?.estimatedTokensUsed ?? (inputTokens + outputTokens);
+    const totalSource: 'gm-estimate' | 'derived-sum' | 'none' =
+      hasAuthoritativeTotal ? 'gm-estimate' :
+      tokenInfo ? 'derived-sum' : 'none';
     const usedPct = contextLimit > 0 ? (totalTokens / contextLimit) * 100 : 0;
 
     const status = traj.status || '';
@@ -700,7 +708,8 @@ export class ContextService {
       const rawIdLabel = modelName.includes(tokenInfo.model) ? '' : ` [id:${tokenInfo.model}]`;
       logInfo(
         `Context: ${modelName}${rawIdLabel} — ${totalTokens.toLocaleString()}/${contextLimit.toLocaleString()} ` +
-        `(${usedPct.toFixed(1)}%) [in=${tokenInfo.inputTokens.toLocaleString()} + cache=${tokenInfo.cacheReadTokens.toLocaleString()} + out=${tokenInfo.outputTokens.toLocaleString()}${estLabel}]` +
+        `(${usedPct.toFixed(1)}%) [in=${tokenInfo.inputTokens.toLocaleString()} + cache=${tokenInfo.cacheReadTokens.toLocaleString()} + out=${tokenInfo.outputTokens.toLocaleString()}${estLabel}] ` +
+        `src=${totalSource}` +
         (isRunning ? ' 🔴 RUNNING' : ''),
       );
     }
@@ -717,6 +726,9 @@ export class ContextService {
       remainingTokens: Math.max(contextLimit - totalTokens, 0),
       isEstimated,
       timestamp: new Date(),
+      totalSource,
+      tokenBreakdown: tokenInfo?.tokenBreakdown,
+      progressionIndex: tokenInfo?.progressionIndex,
     };
   }
 

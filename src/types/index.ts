@@ -118,6 +118,12 @@ export interface ContextSnapshot {
   remainingTokens: number;
   isEstimated: boolean;
   timestamp: Date;
+  /** Source of totalTokens value: server estimate, derived sum, or none */
+  totalSource?: 'gm-estimate' | 'derived-sum' | 'none';
+  /** Server token breakdown by category (when available from contextWindowMetadata) */
+  tokenBreakdown?: { totalTokens: number; groups: Array<{ name: string; numTokens?: number; children?: unknown[] }> };
+  /** Progression index of the winning token source */
+  progressionIndex?: number;
 }
 
 export interface DiagnosticInfo {
