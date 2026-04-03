@@ -221,8 +221,18 @@ export class ContextService {
             if (!trajectories) continue;
 
             for (const [id, traj] of Object.entries(trajectories)) {
-              if (this.workspaceUris.length > 0 && traj.workspaces) {
-                if (!this.matchesWorkspace(traj)) continue;
+              if (this.workspaceUris.length > 0) {
+                const allowFallback = require('../config/settings').getConfig().allowUnknownWorkspaceFallback;
+                if (!traj.workspaces) {
+                  if (!allowFallback) {
+                    logDebug(`Pass 2: skipping ${id.substring(0,8)} — workspace=missing`);
+                    continue;
+                  }
+                  logDebug(`Pass 2: allowing ${id.substring(0,8)} with missing workspace (fallback enabled)`);
+                } else if (!this.matchesWorkspace(traj)) {
+                  logDebug(`Pass 2: skipping ${id.substring(0,8)} — workspace=no-match`);
+                  continue;
+                }
               }
 
               const modified = this.parseModifiedTime(traj.lastModifiedTime);
@@ -347,11 +357,30 @@ export class ContextService {
     if (this.workspaceUris.length === 0 || !traj.workspaces) return false;
     for (const ws of traj.workspaces) {
       const uri = ws.workspaceFolderAbsoluteUri || '';
-      if (this.workspaceUris.some((u) => uri.includes(u) || u.includes(uri))) {
+      if (this.workspaceUris.some((u) => this.uriSegmentMatch(uri, u))) {
         return true;
       }
     }
     return false;
+  }
+
+  /**
+   * Normalize and compare URI paths by segments (not substring).
+   * Prevents false matches like /home/user/project-A matching /home/user/project-AB.
+   * Allows prefix match only on '/' segment boundary.
+   */
+  private uriSegmentMatch(a: string, b: string): boolean {
+    const normalize = (s: string) => {
+      try { s = decodeURIComponent(s); } catch { /* keep as-is */ }
+      return s.replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
+    };
+    const na = normalize(a);
+    const nb = normalize(b);
+    if (na === nb) return true;
+    // Allow prefix match only on segment boundary
+    const longer = na.length >= nb.length ? na : nb;
+    const shorter = na.length < nb.length ? na : nb;
+    return longer.startsWith(shorter) && longer[shorter.length] === '/';
   }
 
   /** Common post-processing: store snapshot, update history, fire callbacks */

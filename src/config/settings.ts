@@ -11,6 +11,8 @@ export interface ExtensionConfig {
   contextLimitOverrides: Record<string, number>;
   serverHost: string;
   debugMode: boolean;
+  /** Allow trajectories without workspace info to participate in auto-selection (Pass 2 fallback) */
+  allowUnknownWorkspaceFallback: boolean;
   statusBar: {
     showContextWindow: boolean;
     models: string[];
@@ -38,6 +40,7 @@ export function getConfig(): ExtensionConfig {
     contextLimitOverrides: cfg.get<Record<string, number>>('contextLimitOverrides', {}),
     serverHost: cfg.get<string>('serverHost', '127.0.0.1'),
     debugMode: cfg.get<boolean>('debugMode', false),
+    allowUnknownWorkspaceFallback: cfg.get<boolean>('allowUnknownWorkspaceFallback', false),
     statusBar: {
       showContextWindow: cfg.get<boolean>('statusBar.showContextWindow', true),
       models: cfg.get<string[]>('statusBar.models', []),
