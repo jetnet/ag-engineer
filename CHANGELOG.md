@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.12] — 2026-04-03
+
+### Fixed
+- **Stale GM estimate contamination**: `estimatedTokensUsed` from GeneratorMetadata is now only merged into Steps data when both share the same progression index. Previously, a stale server estimate from an older turn could overwrite fresher derived totals.
+- **Honest `isEstimated` flag**: Now reflects whether `totalTokens` is server-authoritative (`false`) or a derived `input + cache + output` sum (`true`). Previously it was tied to tokenInfo existence, not estimate source.
+- **Workspace substring false positives**: Replaced `uri.includes()` workspace matching with segment-boundary comparison (`uriSegmentMatch`). Paths like `/project-A` no longer falsely match `/project-AB`.
+- **Pass 2 workspace leak**: Trajectories without workspace metadata are now rejected by default in Pass 2 fallback, preventing workspaceless conversations from silently winning by freshness alone.
+- **WORKSPACE_ID_REGEX**: Now handles both `--workspace_id value` and `--workspace_id=value` argv formats, matching `CSRF_REGEX` symmetry.
+- **LoadTrajectory permanent suppression**: Replaced one-shot `Set<string>` with TTL-based `Map` (configurable via `loadTrajectoryTtlSeconds`, default 120s). Suppression now expires and re-arms, and is cleared on owner port switch.
+
+### Changed
+- **Unified RPC transport**: `ContextService` now delegates all RPC calls to the shared `rpc-client.ts` keep-alive transport instead of its own `http.request()`. The polling hot path now actually benefits from the keep-alive agent introduced in v0.3.10.
+- **New diagnostic fields**: `ContextSnapshot` now carries `totalSource` (`'gm-estimate' | 'derived-sum' | 'none'`), `tokenBreakdown`, and `progressionIndex` for debugging.
+- **New config options**:
+  - `allowUnknownWorkspaceFallback` (default: `false`) — allow workspaceless conversations in auto-selection
+  - `loadTrajectoryTtlSeconds` (default: `120`) — control LoadTrajectory suppression expiry
+- **Discovery documented as Linux-only**: Platform-specific discovery backends (darwin, windows) deferred to future PR.
+- **README accuracy**: Updated claims about token data source and workspace binding to match actual behavior.
+
 ## [0.3.11] — 2026-04-03
 
 ### Changed

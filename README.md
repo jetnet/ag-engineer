@@ -9,11 +9,11 @@ VS Code extension for Google Antigravity IDE that monitors **context window usag
 ## Features
 
 ### 📊 Context Window Monitor
-- **Actual token data** from server-computed `estimatedTokensUsed`
+- **Prefers server-computed `estimatedTokensUsed`**; falls back to `input + cache + output` when unavailable
 - `inputTokens + cacheReadTokens` = full cached and uncached sizes
 - Visual progress bar showing context fill percentage
 - Automatic model detection from `apiProvider` field
-- Workspace-aware: only shows data for the current project
+- Best-effort workspace-aware session binding
 
 ### 📈 Model Quota Dashboard
 - Per-model quota percentages with reset timers
@@ -76,7 +76,7 @@ npm run build
 npm run package
 
 # Install in Antigravity
-antigravity --install-extension antigravity-engineer-0.3.11.vsix
+antigravity --install-extension antigravity-engineer-0.3.12.vsix
 ```
 
 ### From source (development)

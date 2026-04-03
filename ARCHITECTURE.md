@@ -136,8 +136,10 @@ Walking backwards from the last step gives the **freshest available token counts
 **Context window usage** = `estimatedTokensUsed ?? (inputTokens + cacheReadTokens + outputTokens)`
 
 > When available, `estimatedTokensUsed` from `chatModel.contextWindowMetadata` is the authoritative server-computed value.
+> GM estimate is only merged into Steps data when both share the same `progressionIndex` (v0.3.12: prevents stale cross-turn contamination).
 > Fallback: `inputTokens` (uncached) + `cacheReadTokens` (cached) + `outputTokens`.
 > Both input components occupy context window space.
+> `ContextSnapshot.totalSource` tracks which path was taken: `'gm-estimate'`, `'derived-sum'`, or `'none'`.
 
 ### API Behavior Notes
 
@@ -162,11 +164,12 @@ Walking backwards from the last step gives the **freshest available token counts
 - State restoration from `globalState` cache directly passes rehydrated object hierarchies into initializing singletons (like Quota Service and Context Service).
 
 ### Discovery (`platform/discovery.ts`)
-- Scans OS processes for ALL `language_server` instances via `ps -eo pid,ppid,args`
-- Extracts `--csrf_token`, `--workspace_id`, and `ppid` from each process
+- **Linux-only**: Uses `ps -eo pid,ppid,args`, `ss -tlnp`, `lsof`. Platform-specific backends for macOS/Windows deferred to future work.
+- Scans OS processes for ALL `language_server` instances
+- Extracts `--csrf_token` and `--workspace_id` (both `--flag value` and `--flag=value` formats)
 - Logs all LS instances with workspace IDs and PPID match status
 - Prioritizes workspace-matched LS, falls back to first responder
-- Discovers listening ports via `ss -tlnp` (Linux) matched by PID
+- Discovers listening ports via `ss -tlnp` (Linux) / `lsof` (macOS) matched by PID
 - Probes each port with HTTP POST to `GetUserStatus` to find the JSON-RPC port
 - Filters out gRPC/HTTPS ports (only HTTP works without cert conflicts)
 - Extracts `ServerConnection { host, port, csrfToken, pid, ppid }`
@@ -175,6 +178,7 @@ Walking backwards from the last step gives the **freshest available token counts
 - JSON-over-HTTP POST to `exa.language_server_pb.LanguageServerService/*`
 - CSRF token authentication via `X-Codeium-Csrf-Token` header
 - HTTP only (avoiding HTTPS to prevent conflicts with IDE's internal gRPC)
+- Shared `http.Agent({ keepAlive: true })` used by both QuotaService and ContextService (v0.3.12)
 - Gracefully handles `ECONNREFUSED` internally to suppress irrelevant or transitional error noise during standard reconnects.
 
 ### Poller (`services/poller.ts`)
@@ -194,17 +198,17 @@ Walking backwards from the last step gives the **freshest available token counts
 - **Model ID Resolution** (v0.3.11): Exposes `getModelLabelById(modelId)` method that resolves internal model constants (e.g. `MODEL_PLACEHOLDER_M47`) to human-readable display labels (e.g. `Gemini 3 Flash`). Used by `ContextService` as the authoritative, zero-cost model name resolution source.
 
 ### Context Service (`services/context.ts`)
-- **Step 1**: Discover all language servers to route requests accurately.
+- **Step 1**: Discover all language servers to route requests accurately. All RPC calls go through shared `rpc-client.ts` transport (v0.3.12).
 - **Step 2 (Pass 1)**: Collect-and-rank active conversations via `GetBrowserOpenConversation` across ALL LS instances. Score by: workspace match → last modified time → step count. No early `break` — the highest-scoring candidate wins.
-- **Step 2 (Pass 2 fallback)**: If Pass 1 returns nothing, fall through to `GetAllCascadeTrajectories` workspace matching (unchanged).
-- **Step 3 (Owner Resolution)**: After selecting `cascadeId`, concurrently query both the `bestGlobalConn` (active window LS) and the cached port (if any). The candidate with the higher `progressionIndex` wins. If the active LS exceeds the cached progression, the cache is immediately evicted and replaced. Falls through to a full LS-scan only when neither candidate responds. Cache stored as `ownerCache` (Map<cascadeId, {port, lastProgression}>).
-- **Step 4**: Optional `LoadTrajectory` fallback on the owner LS for recovering cold conversations.
+- **Step 2 (Pass 2 fallback)**: If Pass 1 returns nothing, fall through to `GetAllCascadeTrajectories`. Workspace matching uses segment-boundary comparison (v0.3.12: `uriSegmentMatch`). Trajectories without workspace metadata are rejected unless `allowUnknownWorkspaceFallback` is enabled.
+- **Step 3 (Owner Resolution)**: After selecting `cascadeId`, concurrently query both the `bestGlobalConn` (active window LS) and the cached port (if any). The candidate with the higher `progressionIndex` wins. If the active LS exceeds the cached progression, the cache is immediately evicted and replaced. Owner switch clears LoadTrajectory suppression for the cascade. Falls through to a full LS-scan only when neither candidate responds. Cache stored as `ownerCache` (Map<cascadeId, {port, lastProgression}>).
+- **Step 4**: TTL-based `LoadTrajectory` fallback on the owner LS for recovering cold conversations. Suppression expires after `loadTrajectoryTtlSeconds` (default 120s) and is cleared on owner port switch (v0.3.12).
 - **Step 5**: Multi-source token fetch via owner LS:
   - Source 1: `GetCascadeTrajectorySteps` → last step with `metadata.modelUsage`
   - Source 2: `GetCascadeTrajectoryGeneratorMetadata` → last GM entry with token data + `contextWindowMetadata.estimatedTokensUsed`
   - Source 3: `GetCascadeTrajectory` → `numTotalSteps`/`numTotalGM` for diagnostics
-- **Step 6**: Compare sources via monotonic step index fallback (picks by progression, not totals).
-- **Step 7**: Read server-computed `estimatedTokensUsed` as authoritative context window usage. Fallback: `inputTokens + cacheReadTokens + outputTokens`.
+- **Step 6**: Compare sources via monotonic step index fallback (picks by progression, not totals). GM `estimatedTokensUsed` is only merged into Steps when `gmProg === stepsProg` (v0.3.12: prevents stale estimate contamination).
+- **Step 7**: Read server-computed `estimatedTokensUsed` as authoritative context window usage. Fallback: `inputTokens + cacheReadTokens + outputTokens`. `isEstimated` flag honestly reflects total source. `ContextSnapshot.totalSource` tracks provenance.
 - **Model name resolution** (v0.3.11): Uses a 3-tier strategy:
   1. **QuotaService lookup** (authoritative): `QuotaService.getModelLabelById(modelId)` resolves internal IDs (e.g. `MODEL_PLACEHOLDER_M47`) to display labels (e.g. `Gemini 3 Flash`) using live `GetUserStatus` RPC data. This is the primary, zero-cost resolution path.
   2. **ModelRegistry fallback**: Substring matching against Cockpit cache data with version-aware sorting (3.1 > 3.0 > 2.5).
@@ -249,6 +253,8 @@ graph LR
         G["statusBar.showContextWindow: true"]
         H["statusBar.models: string[]"]
         I["statusBar.showCredits: true"]
+        J["allowUnknownWorkspaceFallback: false"]
+        K["loadTrajectoryTtlSeconds: 120"]
     end
 ```
 
@@ -267,3 +273,5 @@ graph LR
 2. **No per-turn push**: `StreamAgentStateUpdates` only sends an initial snapshot during IDLE. Delta frames during RUNNING are not yet confirmed/implemented.
 3. **Multi-LS routing**: Addressed in v0.3.8 via workspace-based discovery sorting + concurrent live+cache owner resolution. Each poll concurrently checks both the active-window LS and the cached LS; the one with the higher `progressionIndex` wins, so model/token display updates immediately after any new message without waiting for a cache eviction timeout.
 4. **Sliding window**: Steps API returns ~1135 steps. For very long conversations, older steps fall out of the window.
+5. **Linux-only discovery**: Process discovery (`ps`, `ss`, `lsof`) only supports Linux and macOS. Windows support requires a separate backend implementation (deferred).
+6. **Best-effort workspace binding**: Two IDE windows with identical workspace paths cannot be deterministically disambiguated. Winner is selected by freshness/step heuristics.
