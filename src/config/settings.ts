@@ -13,6 +13,8 @@ export interface ExtensionConfig {
   debugMode: boolean;
   /** Allow trajectories without workspace info to participate in auto-selection (Pass 2 fallback) */
   allowUnknownWorkspaceFallback: boolean;
+  /** How long (seconds) to suppress repeated LoadTrajectory calls for the same cascade before re-arming */
+  loadTrajectoryTtlSeconds: number;
   statusBar: {
     showContextWindow: boolean;
     models: string[];
@@ -41,6 +43,7 @@ export function getConfig(): ExtensionConfig {
     serverHost: cfg.get<string>('serverHost', '127.0.0.1'),
     debugMode: cfg.get<boolean>('debugMode', false),
     allowUnknownWorkspaceFallback: cfg.get<boolean>('allowUnknownWorkspaceFallback', false),
+    loadTrajectoryTtlSeconds: cfg.get<number>('loadTrajectoryTtlSeconds', 120),
     statusBar: {
       showContextWindow: cfg.get<boolean>('statusBar.showContextWindow', true),
       models: cfg.get<string[]>('statusBar.models', []),

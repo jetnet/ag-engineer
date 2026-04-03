@@ -110,6 +110,13 @@
           "default": false,
           "description": "Allow conversations without workspace metadata to be auto-selected when no workspace-matched conversation is found. When false (default), only conversations explicitly associated with the current workspace are shown."
         },
+        "antigravityEngineer.loadTrajectoryTtlSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 30,
+          "maximum": 600,
+          "description": "How long (seconds) to suppress repeated LoadTrajectory recovery calls for the same conversation before allowing a retry. Lower values re-arm faster after a conversation goes cold; higher values reduce redundant server calls."
+        },
         "antigravityEngineer.statusBar.showContextWindow": {
           "type": "boolean",
           "default": true,

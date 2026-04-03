@@ -99,7 +99,8 @@ export class ContextService {
   private readonly maxHistory = 100;
   private modelRegistry: ModelRegistry | null = null;
   private quotaService: QuotaService | null = null;
-  private suppressedLoadTrajectories = new Set<string>();
+  /** TTL-based LoadTrajectory suppression: loadKey → timestamp (ms) */
+  private suppressedLoadTrajectories = new Map<string, number>();
 
   /** Workspace URIs to match against trajectories */
   private workspaceUris: string[] = [];
@@ -287,6 +288,14 @@ export class ContextService {
             logDebug(`Owner cache hit: port=${ownerConn.port} prog=${prog}`);
           } else {
             logDebug(`Owner switch: from ${cached?.port} to ${ownerConn.port} prog=${prog}`);
+            // Clear LoadTrajectory suppression for this cascade — owner changed, re-arm recovery
+            if (cached) {
+              for (const key of this.suppressedLoadTrajectories.keys()) {
+                if (key.endsWith(`:${bestGlobalId}`)) {
+                  this.suppressedLoadTrajectories.delete(key);
+                }
+              }
+            }
           }
         } else {
           logDebug(`Owner cache invalidated: best prog=${prog} < lastProg=${cached.lastProgression}`);
@@ -425,11 +434,15 @@ export class ContextService {
 
     // --- Cold Start Recovery (LoadTrajectory) ---
     // Triggered if steps/gm are locally empty (e.g. trajectory not found)
+    // Suppression uses TTL to allow re-arm after conversation goes cold and comes back
     const loadKey = `${connection.port}:${cascadeId}`;
-    if (!stepsResult && !gmResult && allowLoadTrajectory && !this.suppressedLoadTrajectories.has(loadKey)) {
-      logInfo(`Triggering one-shot LoadTrajectory for cold owner LS of ${cascadeId}...`);
+    const loadTtlMs = require('../config/settings').getConfig().loadTrajectoryTtlSeconds * 1000;
+    const suppressedAt = this.suppressedLoadTrajectories.get(loadKey);
+    const suppressionExpired = !suppressedAt || (Date.now() - suppressedAt > loadTtlMs);
+    if (!stepsResult && !gmResult && allowLoadTrajectory && suppressionExpired) {
+      logInfo(`Triggering LoadTrajectory for cold owner LS of ${cascadeId}${suppressedAt ? ' (TTL expired)' : ''}...`);
       await this.rpcCall(connection, '/exa.language_server_pb.LanguageServerService/LoadTrajectory', { cascadeId }, d => d);
-      this.suppressedLoadTrajectories.add(loadKey);
+      this.suppressedLoadTrajectories.set(loadKey, Date.now());
       
       // Refetch after forcing load
       stepsResult = await this.fetchFromStepsModelUsage(connection, cascadeId);
