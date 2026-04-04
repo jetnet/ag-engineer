@@ -45,18 +45,37 @@ export async function discoverLanguageServer(host: string): Promise<ServerConnec
 
   try {
     // Step 1: Find ALL LS processes (ppid for window binding)
-    const { stdout } = await execAsync(
-      'ps -eo pid,ppid,args | grep -v grep | grep language_server | grep csrf_token || true',
-      { timeout: 5000 },
-    );
+    const psCmd = process.platform === 'win32'
+      ? 'wmic process where "name!=\'wmic.exe\' and commandline like \'%language_server%\'" get commandline,parentprocessid,processid /format:csv'
+      : 'ps -eo pid,ppid,args | grep -v grep | grep language_server | grep csrf_token || true';
+
+    const { stdout } = await execAsync(psCmd, { timeout: 5000 });
 
     if (!stdout?.trim()) {
       logWarning('No Antigravity language server processes found.');
       return null;
     }
 
-    const lines = stdout.trim().split('\n');
+    const rawLines = stdout.trim().split(/\r?\n/).filter(l => l.trim());
     const candidates: LSCandidate[] = [];
+
+    const lines: string[] = [];
+    if (process.platform === 'win32') {
+      for (const line of rawLines) {
+        if (!line.includes('language_server')) continue;
+        const parts = line.split(',');
+        if (parts.length >= 4) {
+          const pid = parts[parts.length - 1]?.trim();
+          const ppid = parts[parts.length - 2]?.trim();
+          const cmd = parts.slice(1, -2).join(',');
+          if (pid && ppid && /^\d+$/.test(pid)) {
+            lines.push(`${pid} ${ppid} ${cmd}`);
+          }
+        }
+      }
+    } else {
+      lines.push(...rawLines);
+    }
 
     for (const line of lines) {
       const pidPpidMatch = line.match(/^\s*(\d+)\s+(\d+)/);
@@ -127,13 +146,32 @@ export async function discoverAllLanguageServers(host: string): Promise<ServerCo
   const connections: ServerConnection[] = [];
 
   try {
-    const { stdout } = await execAsync(
-      'ps -eo pid,ppid,args | grep -v grep | grep language_server | grep csrf_token || true',
-      { timeout: 5000 },
-    );
+    const psCmd = process.platform === 'win32'
+      ? 'wmic process where "name!=\\'wmic.exe\\' and commandline like \\'%language_server%\\'" get commandline,parentprocessid,processid /format:csv'
+      : 'ps -eo pid,ppid,args | grep -v grep | grep language_server | grep csrf_token || true';
+
+    const { stdout } = await execAsync(psCmd, { timeout: 5000 });
     if (!stdout?.trim()) return connections;
 
-    const lines = stdout.trim().split('\n');
+    const rawLines = stdout.trim().split(/\\r?\\n/).filter(l => l.trim());
+    const lines: string[] = [];
+    if (process.platform === 'win32') {
+      for (const line of rawLines) {
+        if (!line.includes('language_server')) continue;
+        const parts = line.split(',');
+        if (parts.length >= 4) {
+          const pid = parts[parts.length - 1]?.trim();
+          const ppid = parts[parts.length - 2]?.trim();
+          const cmd = parts.slice(1, -2).join(',');
+          if (pid && ppid && /^\\d+$/.test(pid)) {
+            lines.push(\`\${pid} \${ppid} \${cmd}\`);
+          }
+        }
+      }
+    } else {
+      lines.push(...rawLines);
+    }
+
     for (const line of lines) {
       const pidPpidMatch = line.match(/^\s*(\d+)\s+(\d+)/);
       const csrfMatch = line.match(CSRF_REGEX);
@@ -166,7 +204,9 @@ async function getListeningPorts(pid: number): Promise<number[]> {
   const ports: number[] = [];
   try {
     const cmd =
-      process.platform === 'darwin'
+      process.platform === 'win32'
+        ? `netstat -ano | findstr ${pid}`
+        : process.platform === 'darwin'
         ? `lsof -iTCP -sTCP:LISTEN -P -n | grep ${pid}`
         : `ss -tlnp 2>/dev/null | grep "pid=${pid}," || netstat -tlnp 2>/dev/null | grep "${pid}/"`;
     const { stdout } = await execAsync(cmd, { timeout: 5000 });

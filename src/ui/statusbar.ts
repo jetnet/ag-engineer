@@ -25,7 +25,7 @@ export class StatusBarManager {
   };
 
   constructor() {
-    this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    this.item = vscode.window.createStatusBarItem('ag-engineer-status', vscode.StatusBarAlignment.Right, 100);
     this.item.command = 'antigravityEngineer.openDashboard';
     this.item.name = 'AG Engineer';
     this.render();
@@ -119,6 +119,7 @@ export class StatusBarManager {
       ? `$(pulse) ${parts.join(' | ')}`
       : '$(pulse) AG';
     this.item.tooltip = this.buildTooltip();
+    try { this.item.show(); } catch(e) {}
   }
 
   private buildTooltip(): string {
