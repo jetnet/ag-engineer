@@ -30,7 +30,7 @@ export const DEFAULT_CONTEXT_LIMITS: Record<string, number> = {
   'claude-sonnet': 200_000,
   'gemini-pro': 1_000_000,
   'gemini-flash': 1_000_000,
-  'gpt': 128_000,
+  'gpt': 120_000,
 };
 
 export function getConfig(): ExtensionConfig {
@@ -46,7 +46,10 @@ export function getConfig(): ExtensionConfig {
     loadTrajectoryTtlSeconds: cfg.get<number>('loadTrajectoryTtlSeconds', 120),
     statusBar: {
       showContextWindow: cfg.get<boolean>('statusBar.showContextWindow', true),
-      models: cfg.get<string[]>('statusBar.models', []),
+      models: (() => {
+        const arr = cfg.get<string[]>('statusBar.models', []);
+        return arr.length > 0 ? arr : ["Pro", "Flash", "Sonnet", "Opus", "GPT"];
+      })(),
       showCredits: cfg.get<boolean>('statusBar.showCredits', true),
     },
   };

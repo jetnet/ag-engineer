@@ -1,14 +1,14 @@
 /**
- * Status Bar item — compact display of context + quota in the VS Code footer.
+ * Status Bar item — компактное отображение контекста + квоты в футере VS Code.
  *
- * Format: 🟢 Model | 53K/200K (26%) | Quota: 80%
- * Color thresholds:
- *   Green  < 60% context used
- *   Yellow < 80% context used
- *   Red    ≥ 80% context used
+ * Формат: 🟢 Model | 53K/200K (26%) | Quota: 80%
+ * Пороги цветов:
+ *   Green  < 60% контекста использовано
+ *   Yellow < 80% контекста использовано
+ *   Red    ≥ 80% контекста использовано
  *
- * Click opens the sidebar dashboard.
- * Tooltip shows full breakdown.
+ * Клик открывает панель дашборда.
+ * Тултип показывает полную разбивку.
  */
 import * as vscode from 'vscode';
 import type { QuotaSnapshot, ContextSnapshot, DiagnosticInfo } from '../types';
@@ -23,11 +23,16 @@ export class StatusBarManager {
     pollCount: 0,
     failCount: 0,
   };
+  private lastObservedAiCredits: number | null = null;
+  private blinkTimer: any = null;
+  private isConsuming: boolean = false;
+  private notifiedDepletedModels = new Set<string>();
 
   constructor() {
     this.item = vscode.window.createStatusBarItem('ag-engineer-status', vscode.StatusBarAlignment.Right, 100);
     this.item.command = 'antigravityEngineer.openDashboard';
     this.item.name = 'AG Engineer';
+    // Первый рендер
     this.render();
     this.item.show();
   }
@@ -44,6 +49,15 @@ export class StatusBarManager {
 
   updateDiagnostics(info: DiagnosticInfo): void {
     this.diagnosticInfo = info;
+    
+    try {
+      const gConf = vscode.workspace.getConfiguration('antigravity');
+      const dump = JSON.stringify(gConf);
+      if (dump.length > 20) {
+        require('fs').appendFileSync('C:/Users/Dmitry/Desktop/ag_debug.txt', `CONFIG DUMP: ${dump}\n`);
+      }
+    } catch {}
+
     this.render();
   }
 
@@ -52,6 +66,7 @@ export class StatusBarManager {
   }
 
   private render(): void {
+    try {
     if (this.diagnosticInfo.connectionStatus === 'disconnected') {
       this.item.text = '$(plug) AG: Disconnected';
       this.item.tooltip = 'Click to open dashboard. Language server not found.';
@@ -66,60 +81,123 @@ export class StatusBarManager {
       return;
     }
 
-    // Read display settings
+    // Чтение настроек отображения
     const { statusBar: sb } = getConfig();
 
-    // Normal state — always white/default background
-    this.item.backgroundColor = undefined;
+    // Нормальное состояние — белый/дефолтный фон, если не мигает
+    if (!this.blinkTimer) {
+      this.item.backgroundColor = undefined;
+    }
     const parts: string[] = [];
 
-    // Context window — the most important metric
-    if (sb.showContextWindow && this.lastContext && this.lastContext.totalTokens > 0) {
+    // Контекстное окно — главная метрика (всегда выводим)
+    if (this.lastContext) {
       const ctx = this.lastContext;
       const shortModel = this.shortenModelName(ctx.model || 'Unknown');
-      const totalStr = this.formatTokens(ctx.totalTokens);
-      const limitStr = this.formatTokens(ctx.contextLimit);
-      const pctStr = ctx.usedPercentage.toFixed(0);
-      parts.push(`${shortModel} ${totalStr}/${limitStr} (${pctStr}%)`);
+      const totalStr = this.formatTokens(ctx.totalTokens || 0);
+      const limitStr = this.formatTokens(ctx.contextLimit || 200000);
+      const pct = ctx.usedPercentage || 0;
+      const pctStr = pct.toFixed(0);
+      const squeezeIcon = pct > 90 ? '⚠️' : '';
+      let toolsIcon = '';
+      if (ctx.hasImageGeneration) toolsIcon += '📷';
+      if (ctx.hasWebSearch) toolsIcon += '🌐';
+      if (ctx.hasTerminalCommand) toolsIcon += '💻';
+      if (ctx.hasFileRead) toolsIcon += '📖';
+      if (toolsIcon) toolsIcon = ' ' + toolsIcon;
+      
+      parts.push(`${squeezeIcon}${shortModel}${toolsIcon} ${totalStr}/${limitStr} (${pctStr}%)`);
     }
 
-    // Model quotas — filtered by settings
+    // Квоты моделей — жесткий порядок как в настройках Antigravity, без группировки
     if (this.lastQuota && this.lastQuota.models.length > 0) {
-      const filter = sb.models.map((m) => m.toLowerCase());
-      const groups = new Map<string, { pct: number }>();
-      for (const m of this.lastQuota.models) {
-        const short = this.shortenModelName(m.label);
-        // Skip if filter is set and this model isn't in it
-        if (filter.length > 0 && !filter.includes(short.toLowerCase())) continue;
+      const desiredOrder = [
+        'Gemini 3.1 Pro (High)',
+        'Gemini 3.1 Pro (Low)',
+        'Gemini 3 Flash',
+        'Claude Sonnet 4.6 (Thinking)',
+        'Claude Opus 4.6 (Thinking)',
+        'GPT-OSS 120B (Medium)'
+      ];
 
-        const existing = groups.get(short);
-        if (existing) {
-          existing.pct = Math.min(existing.pct, m.remainingPercentage);
-        } else {
-          groups.set(short, { pct: m.remainingPercentage });
+      const quotaParts: string[] = [];
+      const modelMap = new Map();
+      
+      // Индексируем модели
+      for (const m of this.lastQuota.models) {
+        modelMap.set(m.label, m.remainingPercentage);
+      }
+
+      // Достаем в нужном порядке
+      for (const label of desiredOrder) {
+        if (modelMap.has(label)) {
+          const pct = modelMap.get(label);
+          const dot = pct <= 0 ? '🔴' : pct <= 30 ? '🟡' : '🟢';
+          let short = this.shortenModelName(label);
+          if (label.includes('Pro (High)')) short = 'Pro(H)';
+          if (label.includes('Pro (Low)')) short = 'Pro(L)';
+          quotaParts.push(`${dot}${short} ${Math.round(pct)}%`);
         }
       }
 
-      const quotaParts: string[] = [];
-      for (const [name, { pct }] of groups) {
-        const dot = pct <= 0 ? '🔴' : pct <= 30 ? '🟡' : '🟢';
-        quotaParts.push(`${dot}${name} ${Math.round(pct)}%`);
+      // Добиваем остальные, если они есть
+      for (const [label, pct] of modelMap) {
+        if (!desiredOrder.includes(label)) {
+          const dot = pct <= 0 ? '🔴' : pct <= 30 ? '🟡' : '🟢';
+          quotaParts.push(`${dot}${this.shortenModelName(label)} ${Math.round(pct)}%`);
+        }
       }
+
+      // Check for depleted models to warn once
+      for (const [label, pct] of modelMap) {
+        if (pct <= 0 && !this.notifiedDepletedModels.has(label)) {
+          vscode.window.showWarningMessage(`Antigravity: Квота модели ${label} исчерпана (0%). Пожалуйста, подождите сброса.`);
+          this.notifiedDepletedModels.add(label);
+        } else if (pct > 0 && this.notifiedDepletedModels.has(label)) {
+          this.notifiedDepletedModels.delete(label); // Reset tracking when it refills
+        }
+      }
+
       if (quotaParts.length > 0) {
-        parts.push(quotaParts.join(' '));
+        parts.push(quotaParts.join(' | '));
       }
     }
 
     // AI Credits
     if (sb.showCredits && this.lastQuota?.userInfo?.totalAiCredits != null) {
-      parts.push(`💎${this.formatTokens(this.lastQuota.userInfo.totalAiCredits)}`);
+      const currentCredits = this.lastQuota.userInfo.totalAiCredits;
+      if (this.lastObservedAiCredits !== null && currentCredits < this.lastObservedAiCredits) {
+        this.triggerBlink();
+      }
+      this.lastObservedAiCredits = currentCredits;
+
+      const prefix = this.isConsuming ? '🔥' : '💎';
+      parts.push(`${prefix} ${currentCredits.toLocaleString()}`);
     }
 
-    this.item.text = parts.length > 0
-      ? `$(pulse) ${parts.join(' | ')}`
-      : '$(pulse) AG';
+    if (parts.length > 0) {
+      this.item.text = `$(pulse) ${parts.join(' | ')}`;
+      this.item.show();
+      try {
+        require('fs').appendFileSync('C:/Users/Dmitry/Desktop/ag_debug.txt', `RENDERED: ${this.item.text}\n`);
+      } catch {}
+    } else {
+      this.item.text = '$(pulse) AG';
+      this.item.show();
+    }
     this.item.tooltip = this.buildTooltip();
-    try { this.item.show(); } catch(e) {}
+    } catch (e) {
+      require('fs').appendFileSync('C:/Users/Dmitry/Desktop/ag_debug.txt', `STATUSBAR ERROR: ${e instanceof Error ? e.stack : String(e)}\n`);
+    }
+  }
+
+  private triggerBlink(): void {
+    // Blinker disabled to prevent status bar remaining red continuously
+    this.isConsuming = true;
+    setTimeout(() => {
+      this.isConsuming = false;
+      this.render();
+    }, 1000);
   }
 
   private buildTooltip(): string {
@@ -173,21 +251,21 @@ export class StatusBarManager {
   }
 
   private shortenModelName(name: string): string {
-    const map: Record<string, string> = {
-      'claude opus': 'Opus',
-      'claude sonnet': 'Sonnet',
-      'gemini 3.1 pro': 'Pro',
-      'gemini pro': 'Pro',
-      'gemini 3 flash': 'Flash',
-      'gemini flash': 'Flash',
-      'gpt-oss': 'GPT',
-      'gpt': 'GPT',
-    };
+    // Проверяем по подстрокам — от длинных к коротким, чтобы избежать ложных совпадений
     const lower = name.toLowerCase();
-    for (const [key, short] of Object.entries(map)) {
-      if (lower.includes(key)) return short;
-    }
-    // Truncate to 10 chars
+    if (lower.includes('opus'))   return 'Opus';
+    if (lower.includes('sonnet')) return 'Sonnet';
+    if (lower.includes('haiku'))  return 'Haiku';
+    if (lower.includes('flash'))  return 'Flash';
+    if (lower.includes('ultra'))  return 'Ultra';
+    if (lower.includes('3.1 pro') || lower.includes('3.1pro')) return 'Pro 3.1';
+    if (lower.includes('3 pro') || lower.includes('3pro'))    return 'Pro 3';
+    if (lower.includes('pro'))    return 'Pro';
+    if (lower.includes('gemini')) return 'Gemini';
+    if (lower.includes('gpt-oss') || lower.includes('gpt oss')) return 'GPT‑OSS';
+    if (lower.includes('gpt'))    return 'GPT';
+    if (lower.includes('claude')) return 'Claude';
+    // Fallback — обрезаем
     return name.length > 10 ? name.substring(0, 10) + '…' : name;
   }
 

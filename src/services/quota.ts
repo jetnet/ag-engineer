@@ -59,6 +59,12 @@ export class QuotaService {
       this.lastSnapshot = snapshot;
       this.logSnapshot(snapshot);
 
+      // Дамп modelId для отладки маппинга плейсхолдеров
+      try {
+        const modelDump = snapshot.models.map(m => `${m.label}=${m.remainingPercentage}`).join(', ');
+        require('fs').appendFileSync('C:/Users/Dmitry/Desktop/ag_debug.txt', `QUOTA MODELS: ${modelDump}\n`);
+      } catch {}
+
       for (const cb of this.updateCallbacks) {
         try { cb(snapshot); } catch { /* swallow UI callback errors */ }
       }
@@ -186,7 +192,23 @@ export class QuotaService {
           isCritical: remainingPct <= config.criticalQuotaThreshold,
         };
       })
-      .sort((a, b) => a.label.localeCompare(b.label));
+      .sort((a, b) => {
+        const order = [
+          'Gemini 3.1 Pro (High)',
+          'Gemini 3.1 Pro (Low)',
+          'Gemini 3 Flash',
+          'Claude Sonnet 4.6 (Thinking)',
+          'Claude Opus 4.6 (Thinking)',
+          'GPT-OSS 120B (Medium)'
+        ];
+        const aIndex = order.findIndex(l => a.label.includes(l) || l.includes(a.label));
+        const bIndex = order.findIndex(l => b.label.includes(l) || l.includes(b.label));
+        
+        if (aIndex !== -1 && bIndex !== -1) return aIndex - bIndex;
+        if (aIndex !== -1) return -1;
+        if (bIndex !== -1) return 1;
+        return a.label.localeCompare(b.label);
+      });
 
     // Plan name: prefer userTier.name ("Google AI Ultra") over planInfo.planName ("Pro")
     const planName = userTier?.name

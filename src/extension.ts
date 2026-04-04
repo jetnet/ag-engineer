@@ -152,7 +152,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             connectionStatus: 'disconnected',
             failCount: diagnostics.failCount + 1,
           });
-          return;
+          throw new Error('LS Discovery failed');
         }
 
         logSuccess(`Connected to LS on port ${connection.port} (PID: ${connection.pid})`);
@@ -174,7 +174,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           connection = null;
           updateDiagnostics({ ...diagnostics, connectionStatus: 'disconnected' });
         }
-        return;
+        throw new Error('Failed to fetch quota RPC');
       }
 
       // Step 3: Fetch context (trajectory-based estimation)

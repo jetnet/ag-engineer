@@ -147,13 +147,13 @@ export async function discoverAllLanguageServers(host: string): Promise<ServerCo
 
   try {
     const psCmd = process.platform === 'win32'
-      ? 'wmic process where "name!=\\'wmic.exe\\' and commandline like \\'%language_server%\\'" get commandline,parentprocessid,processid /format:csv'
+      ? `wmic process where "name!='wmic.exe' and commandline like '%language_server%'" get commandline,parentprocessid,processid /format:csv`
       : 'ps -eo pid,ppid,args | grep -v grep | grep language_server | grep csrf_token || true';
 
     const { stdout } = await execAsync(psCmd, { timeout: 5000 });
     if (!stdout?.trim()) return connections;
 
-    const rawLines = stdout.trim().split(/\\r?\\n/).filter(l => l.trim());
+    const rawLines = stdout.trim().split(/\r?\n/).filter(l => l.trim());
     const lines: string[] = [];
     if (process.platform === 'win32') {
       for (const line of rawLines) {
@@ -163,8 +163,8 @@ export async function discoverAllLanguageServers(host: string): Promise<ServerCo
           const pid = parts[parts.length - 1]?.trim();
           const ppid = parts[parts.length - 2]?.trim();
           const cmd = parts.slice(1, -2).join(',');
-          if (pid && ppid && /^\\d+$/.test(pid)) {
-            lines.push(\`\${pid} \${ppid} \${cmd}\`);
+          if (pid && ppid && /^\d+$/.test(pid)) {
+            lines.push(`${pid} ${ppid} ${cmd}`);
           }
         }
       }

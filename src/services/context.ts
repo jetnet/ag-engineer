@@ -36,7 +36,9 @@ const API_PROVIDER_LABELS: Record<string, string> = {
   API_PROVIDER_ANTHROPIC: 'Claude',
   API_PROVIDER_GOOGLE: 'Gemini',
   API_PROVIDER_GOOGLE_VERTEX: 'Gemini',
+  API_PROVIDER_GOOGLE_GEMINI: 'Gemini Flash',
   API_PROVIDER_OPENAI: 'GPT',
+  API_PROVIDER_OSS: 'GPT-OSS',
 };
 
 interface TrajectorySummary {
@@ -56,10 +58,17 @@ interface StepTokenInfo {
   apiProvider: string;
   /** Server-estimated total context window usage (more accurate than sum of fields) */
   estimatedTokensUsed?: number;
+  /** For extensive debugging */
+  cwmDump?: unknown;
   /** Optional breakdown by category */
   tokenBreakdown?: TokenBreakdown;
   /** Index for arbitration */
   progressionIndex?: number;
+  /** Set to true if any step in this generator run matches image generation schemas */
+  hasImageGeneration?: boolean;
+  hasWebSearch?: boolean;
+  hasTerminalCommand?: boolean;
+  hasFileRead?: boolean;
 }
 
 interface TokenBreakdown {
@@ -160,6 +169,9 @@ export class ContextService {
             {},
             (d) => d
           );
+          
+          require('fs').appendFileSync('C:/Users/Dmitry/Desktop/ag_debug.txt', `PASS 1 RESP (port ${srv.port}): ${JSON.stringify(resp)}\n`);
+
           if (resp && resp.cascadeId) {
             const cascadeId = resp.cascadeId as string;
             // Fetch trajectory summary for scoring (workspace, modified, stepCount)
@@ -197,19 +209,30 @@ export class ContextService {
           return b.stepCount - a.stepCount;
         });
 
+        // DISABLE PASS 1 WINNER ASSIGNMENT TO FORCE PASS 2 LAST-MODIFIED SORTING!
+        // The language server on Windows is known to return stale cascades here.
+        /*
         const winner = openCandidates[0];
         bestGlobalId = winner.cascadeId;
         bestGlobalTraj = winner.traj;
         bestGlobalConn = winner.srv;
         bestGlobalTime = winner.modified;  // §C-6: fix 1970-01-01 log
+        */
 
         if (openCandidates.length > 1) {
-          logDebug(`Pass 1: ${openCandidates.length} candidates — winner port=${winner.srv.port} ` +
-            `ws=${winner.workspaceMatch} modified=${new Date(winner.modified).toISOString()}`);
+          logDebug(`Pass 1: ${openCandidates.length} candidates — winner port=${openCandidates[0].srv.port} ` +
+            `ws=${openCandidates[0].workspaceMatch} modified=${new Date(openCandidates[0].modified).toISOString()}`);
         }
       }
 
       // ─── Pass 2: Fallback to GetAllCascadeTrajectories workspace matching ───
+      let fallbackGlobalTime = 0;
+      let fallbackGlobalId = '';
+      let fallbackGlobalTraj: TrajectorySummary | null = null;
+      let fallbackGlobalConn: ServerConnection | null = null;
+
+      let debugDump = `--- PASS 2 TICK ---\n`;
+
       if (!bestGlobalId || !bestGlobalTraj) {
         for (const srv of serversToTry) {
           try {
@@ -223,20 +246,13 @@ export class ContextService {
 
             for (const [id, traj] of Object.entries(trajectories)) {
               if (this.workspaceUris.length > 0) {
-                const allowFallback = require('../config/settings').getConfig().allowUnknownWorkspaceFallback;
-                if (!traj.workspaces) {
-                  if (!allowFallback) {
-                    logDebug(`Pass 2: skipping ${id.substring(0,8)} — workspace=missing`);
-                    continue;
-                  }
-                  logDebug(`Pass 2: allowing ${id.substring(0,8)} with missing workspace (fallback enabled)`);
-                } else if (!this.matchesWorkspace(traj)) {
-                  logDebug(`Pass 2: skipping ${id.substring(0,8)} — workspace=no-match`);
-                  continue;
+                if (!traj.workspaces || traj.workspaces.length === 0) {
+                   continue;
                 }
               }
 
               const modified = this.parseModifiedTime(traj.lastModifiedTime);
+              debugDump += `Traj: ${id.substring(0,8)} - Mod: ${modified} (raw: ${JSON.stringify(traj.lastModifiedTime)}) WS: ${traj.workspaces?.[0]?.workspaceFolderAbsoluteUri}\n`;
 
               if (modified && !isNaN(modified) && modified > bestGlobalTime) {
                 bestGlobalTime = modified;
@@ -249,9 +265,14 @@ export class ContextService {
         }
       }
 
+      debugDump += `WINNER PASS 2: ${bestGlobalId.substring(0,8)} at ${bestGlobalTime}\n`;
+
       if (!bestGlobalId || !bestGlobalTraj || !bestGlobalConn) {
+        require('fs').appendFileSync('C:/Users/Dmitry/Desktop/ag_debug.txt', debugDump + 'RETURNED NULL\n');
         return null;
       }
+      
+      require('fs').appendFileSync('C:/Users/Dmitry/Desktop/ag_debug.txt', debugDump);
 
       const shortId = bestGlobalId.substring(0, 8);
       logInfo(`Mapped active trajectory ${bestGlobalId} to workspace via port ${bestGlobalConn.port} (last modified: ${new Date(bestGlobalTime).toISOString()})`);
@@ -334,6 +355,8 @@ export class ContextService {
         logDebug(`No token info found during owner resolution, trying to load trajectory on winning owner port ${ownerConn.port}...`);
         tokenInfo = await this.fetchLatestTokenInfo(ownerConn, bestGlobalId, true);
       }
+      
+      require('fs').appendFileSync('C:/Users/Dmitry/Desktop/ag_debug.txt', `TOKEN INFO: ${tokenInfo ? JSON.stringify(tokenInfo) : 'NULL'}\n`);
 
       if (tokenInfo) {
         // Update cache §C-7
@@ -342,8 +365,10 @@ export class ContextService {
 
       // Build snapshot
       const snapshot = this.buildSnapshot(bestGlobalId, bestGlobalTraj, tokenInfo);
+      require('fs').appendFileSync('C:/Users/Dmitry/Desktop/ag_debug.txt', `SNAPSHOT MODEL: ${snapshot.model} TOTAL: ${snapshot.totalTokens}\n\n`);
       return this.finishSnapshot(snapshot);
     } catch (err) {
+      require('fs').appendFileSync('C:/Users/Dmitry/Desktop/ag_debug.txt', `ERROR: ${err}\n\n`);
       logWarning(`Context fetch error: ${err instanceof Error ? err.message : String(err)}`);
       return null;
     }
@@ -588,8 +613,46 @@ export class ContextService {
       if (estimatedTokensUsed !== undefined) {
         logDebug(`GM[${i}]: estimatedTokensUsed=${estimatedTokensUsed.toLocaleString()}`);
       }
+      
+      // Determine if there is image generation in any step leading up to this points
+      let hasImageGeneration = false;
+      let hasWebSearch = false;
+      let hasTerminalCommand = false;
+      let hasFileRead = false;
+      
+      for (const step of gmArray) {
+        const stepType = String(step.stepType || '').toLowerCase();
+        const genModel = String(step.generatorModelName || '').toLowerCase();
+        
+        if (stepType.includes('image_generation') || genModel.includes('imagen')) {
+          hasImageGeneration = true;
+        }
+        if (stepType.includes('search') || stepType.includes('web')) {
+          hasWebSearch = true;
+        }
+        if (stepType.includes('cmd') || stepType.includes('command') || stepType.includes('bash') || stepType.includes('terminal')) {
+          hasTerminalCommand = true;
+        }
+        if (stepType.includes('read_file') || stepType.includes('list_dir') || stepType.includes('view') || stepType.includes('read')) {
+          hasFileRead = true;
+        }
+      }
 
-      return { model, inputTokens, outputTokens, cacheReadTokens, apiProvider, estimatedTokensUsed, tokenBreakdown, progressionIndex: progIndex };
+      return { 
+        model, 
+        inputTokens, 
+        outputTokens, 
+        cacheReadTokens, 
+        apiProvider, 
+        estimatedTokensUsed, 
+        cwmDump: cwm,
+        tokenBreakdown, 
+        progressionIndex: progIndex,
+        hasImageGeneration,
+        hasWebSearch,
+        hasTerminalCommand,
+        hasFileRead
+      };
     }
 
     return null;
@@ -604,17 +667,54 @@ export class ContextService {
     let modelName = 'Unknown';
     let contextLimit = 200_000;
     let canonicalModelKey = '';
+    
+    let modelWindow = 200_000;
+    let runtimeLimit = 200_000;
+    let softLimit = 160_000;
 
     if (tokenInfo) {
-      // Use API provider for display name
+      // Use API provider for display name (базовый fallback)
       modelName = API_PROVIDER_LABELS[tokenInfo.apiProvider] || tokenInfo.model;
 
       // §C-NEW: Authoritative model name from QuotaService (GetUserStatus RPC)
-      // This directly maps MODEL_PLACEHOLDER_MXX → display label without fuzzy guessing
+      // Ищем точное совпадение по modelId, затем fuzzy-поиск по apiProvider среди моделей квоты
       const quotaLabel = this.quotaService?.getModelLabelById(tokenInfo.model);
       if (quotaLabel) {
         modelName = quotaLabel;
-        logDebug(`Model resolved via QuotaService: "${tokenInfo.model}" → "${quotaLabel}"`);
+        logDebug(`Model resolved via QuotaService (exact): "${tokenInfo.model}" → "${quotaLabel}"`);
+      } else if (this.quotaService && tokenInfo.model.startsWith('MODEL_PLACEHOLDER_')) {
+        // Fallback: найти любую модель в квоте по провайдеру
+        const quotaSnap = this.quotaService.getLastSnapshot();
+        if (quotaSnap && quotaSnap.models.length > 0) {
+          const provLC = tokenInfo.apiProvider.toLowerCase();
+          // Улучшенный выбор модели квоты: пытаемся найти точное семейство в названии модели или провайдера
+          const tokenModelLC = tokenInfo.model.toLowerCase();
+          const providerModel = quotaSnap.models.find(m => {
+            const lb = m.label.toLowerCase();
+            
+            if (provLC.includes('anthropic') || tokenModelLC.includes('claude')) {
+              // Если это антропик, проверяем специфичные слова
+              if (tokenModelLC.includes('opus') && lb.includes('opus')) return true;
+              if (tokenModelLC.includes('sonnet') && lb.includes('sonnet')) return true;
+              if (lb.includes('claude')) return true; // generic fallback
+            }
+            if (provLC.includes('google') || tokenModelLC.includes('gemini')) {
+              // Если это гугл, проверяем Flash или Pro
+              if (tokenModelLC.includes('flash') && lb.includes('flash')) return true;
+              if (tokenModelLC.includes('pro') && lb.includes('pro')) return true;
+              // Если точной информации нет, но модель квоты flash/pro, вернем первое совпадение
+              if (lb.includes('gemini') || lb.includes('flash') || lb.includes('pro')) return true;
+            }
+            if (provLC.includes('openai') || provLC.includes('oss') || tokenModelLC.includes('gpt')) {
+              if (lb.includes('gpt')) return true;
+            }
+            return false;
+          });
+          if (providerModel) {
+            modelName = providerModel.label;
+            logDebug(`Model resolved via QuotaService (smart fallback): "${tokenInfo.model}" + "${tokenInfo.apiProvider}" → "${providerModel.label}"`);
+          }
+        }
       }
 
       // Look up context limit from model registry
@@ -727,6 +827,20 @@ export class ContextService {
           }
         }
       }
+      modelWindow = contextLimit; // Default from registry
+      // Fallback: Hardcoded limits for well-known model families if registry failed or gave wrong limit
+      const mlc = modelName.toLowerCase();
+      if (mlc.includes('gemini') || mlc.includes('flash') || mlc.includes('pro')) {
+        modelWindow = 1048576;
+      } else if (mlc.includes('opus') || mlc.includes('sonnet')) {
+        modelWindow = 200000;
+      } else if (mlc.includes('gpt')) {
+        modelWindow = 120000;
+      }
+      
+      // IDE enforces maximum 200K runtime limit
+      runtimeLimit = 200000;
+      softLimit = 160000;
     }
 
     // Token data — §C-5: prefer server-authoritative estimatedTokensUsed
@@ -740,7 +854,7 @@ export class ContextService {
     const totalSource: 'gm-estimate' | 'derived-sum' | 'none' =
       hasAuthoritativeTotal ? 'gm-estimate' :
       tokenInfo ? 'derived-sum' : 'none';
-    const usedPct = contextLimit > 0 ? (totalTokens / contextLimit) * 100 : 0;
+    const usedPct = runtimeLimit > 0 ? (totalTokens / runtimeLimit) * 100 : 0;
 
     const status = traj.status || '';
     const isRunning = status.includes('RUNNING');
@@ -748,10 +862,11 @@ export class ContextService {
     if (tokenInfo) {
       const estLabel = tokenInfo.estimatedTokensUsed !== undefined ? ` est=${tokenInfo.estimatedTokensUsed.toLocaleString()}` : '';
       const rawIdLabel = modelName.includes(tokenInfo.model) ? '' : ` [id:${tokenInfo.model}]`;
+      const imgLabel = tokenInfo.hasImageGeneration ? ' 📷' : '';
       logInfo(
         `Context: ${modelName}${rawIdLabel} — ${totalTokens.toLocaleString()}/${contextLimit.toLocaleString()} ` +
         `(${usedPct.toFixed(1)}%) [in=${tokenInfo.inputTokens.toLocaleString()} + cache=${tokenInfo.cacheReadTokens.toLocaleString()} + out=${tokenInfo.outputTokens.toLocaleString()}${estLabel}] ` +
-        `src=${totalSource}` +
+        `src=${totalSource}${imgLabel}` +
         (isRunning ? ' 🔴 RUNNING' : ''),
       );
     }
@@ -763,14 +878,23 @@ export class ContextService {
       cacheReadTokens: cacheRead,
       outputTokens,
       totalTokens,
-      contextLimit,
+      contextLimit: runtimeLimit,
+      runtimeLimit,
+      softLimit,
+      modelWindow,
       usedPercentage: Math.min(usedPct, 100),
-      remainingTokens: Math.max(contextLimit - totalTokens, 0),
+      remainingTokens: Math.max(runtimeLimit - totalTokens, 0),
       isEstimated,
       timestamp: new Date(),
       totalSource,
+      cwmDump: tokenInfo?.cwmDump,
       tokenBreakdown: tokenInfo?.tokenBreakdown,
       progressionIndex: tokenInfo?.progressionIndex,
+      hasImageGeneration: tokenInfo?.hasImageGeneration,
+      hasWebSearch: tokenInfo?.hasWebSearch,
+      hasTerminalCommand: tokenInfo?.hasTerminalCommand,
+      hasFileRead: tokenInfo?.hasFileRead,
+      isRunning
     };
   }
 

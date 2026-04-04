@@ -113,17 +113,28 @@ export interface ContextSnapshot {
   cacheReadTokens: number;
   outputTokens: number;
   totalTokens: number;
-  contextLimit: number;
+  contextLimit: number; // deprecated, use runtimeLimit/modelWindow
+  runtimeLimit: number;
+  softLimit: number;
+  modelWindow: number;
   usedPercentage: number;
   remainingTokens: number;
   isEstimated: boolean;
   timestamp: Date;
   /** Source of totalTokens value: server estimate, derived sum, or none */
   totalSource?: 'gm-estimate' | 'derived-sum' | 'none';
+  /** Entire Context Window Metadata payload for deep introspection */
+  cwmDump?: unknown;
   /** Server token breakdown by category (when available from contextWindowMetadata) */
   tokenBreakdown?: { totalTokens: number; groups: Array<{ name: string; numTokens?: number; children?: unknown[] }> };
   /** Progression index of the winning token source */
   progressionIndex?: number;
+  /** True if image generation was detected in the trajectory run */
+  hasImageGeneration?: boolean;
+  hasWebSearch?: boolean;
+  hasTerminalCommand?: boolean;
+  hasFileRead?: boolean;
+  isRunning?: boolean;
 }
 
 export interface DiagnosticInfo {

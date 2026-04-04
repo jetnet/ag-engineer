@@ -178,6 +178,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       overflow: hidden;
       margin: 8px 0;
       display: flex;
+      transition: all 0.3s ease;
+    }
+    
+    @keyframes barPulse {
+      0% { opacity: 1; box-shadow: 0 0 0px var(--clr-output); }
+      50% { opacity: 0.8; box-shadow: 0 0 10px var(--clr-output); }
+      100% { opacity: 1; box-shadow: 0 0 0px var(--clr-output); }
+    }
+    .is-running {
+      animation: barPulse 2s infinite;
+      border: 1px solid var(--clr-output);
     }
     .seg {
       height: 100%;
@@ -316,7 +327,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           <span class="label">Model</span>
           <span id="ctx-model" class="value">—</span>
         </div>
-        <div class="progress-container">
+        <div class="progress-container" id="progress-bar-container">
           <div id="seg-input" class="seg seg-input" style="width:0%"></div>
           <div id="seg-cache" class="seg seg-cache" style="width:0%"></div>
           <div id="seg-output" class="seg seg-output" style="width:0%"></div>
@@ -345,6 +356,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           <span class="label">Used</span>
           <span id="ctx-pct" class="value">—</span>
         </div>
+        
+        <div id="ctx-breakdown" style="display:none; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border)">
+          <div class="row" style="margin-bottom: 6px;">
+            <span class="label" style="opacity: 1; font-weight: 600;">📂 Context Anatomy</span>
+          </div>
+          <div id="ctx-breakdown-list"></div>
+        </div>
+        
         <div class="chart-container" id="chart-section" style="display:none">
           <div class="chart-label">Context over time</div>
           <canvas id="sparkline" class="chart-canvas"></canvas>
@@ -433,7 +452,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       document.getElementById('context-data').style.display = 'block';
 
       const est = ctx.isEstimated ? ' ~' : '';
-      document.getElementById('ctx-model').textContent = ctx.model;
+      let toolsIcon = '';
+      if (ctx.hasImageGeneration) toolsIcon += '📷';
+      if (ctx.hasWebSearch) toolsIcon += '🌐';
+      if (ctx.hasTerminalCommand) toolsIcon += '💻';
+      if (ctx.hasFileRead) toolsIcon += '📖';
+      if (toolsIcon) toolsIcon = ' ' + toolsIcon;
+      document.getElementById('ctx-model').textContent = ctx.model + toolsIcon;
       document.getElementById('ctx-model').className = ctx.isEstimated ? 'value estimated' : 'value';
       document.getElementById('ctx-used').textContent = fmt(ctx.totalTokens) + est;
       document.getElementById('ctx-limit').textContent = '/ ' + fmt(ctx.contextLimit);
@@ -446,6 +471,47 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       document.getElementById('ctx-output').textContent = fmt(ctx.outputTokens) + est;
       document.getElementById('ctx-remaining').textContent = fmt(ctx.remainingTokens);
       document.getElementById('ctx-pct').textContent = ctx.usedPercentage.toFixed(1) + '%';
+      
+      const pbc = document.getElementById('progress-bar-container');
+      if (pbc) {
+        if (ctx.isRunning) pbc.classList.add('is-running');
+        else pbc.classList.remove('is-running');
+      }
+      
+      // Render Token Breakdown (File Weights)
+      if (ctx.tokenBreakdown || ctx.cwmDump) {
+        let bHtml = '';
+        
+        if (ctx.tokenBreakdown && ctx.tokenBreakdown.groups && ctx.tokenBreakdown.groups.length > 0) {
+          // Recursive rendering
+          function renderGroup(g, indent) {
+            const toks = g.numTokens !== undefined ? g.numTokens : (g.tokenCount !== undefined ? g.tokenCount : (g.totalTokens !== undefined ? g.totalTokens : 0));
+            if (!toks && !g.children) return; 
+            
+            const k = toks >= 1000 ? (toks/1000).toFixed(1)+'k' : toks;
+            const pad = indent * 8;
+            bHtml += '<div class="row" style="padding-left: ' + pad + 'px; font-size: 11px; margin-bottom: 2px;">' +
+              '<span class="label" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 130px;">' + (g.name || g.source || g.type || '?') + '</span>' +
+              '<span class="value" style="font-family: Consolas, monospace; opacity: 0.8;">' + k + ' t</span>' +
+            '</div>';
+            if (g.children) {
+              for (const child of g.children) renderGroup(child, indent + 1);
+            }
+          }
+          for (const g of ctx.tokenBreakdown.groups) {
+            renderGroup(g, 0);
+          }
+        } else {
+          // Debug fallback: Render raw JSON if format is unexpected or missing entirely
+          const payloadToDump = ctx.cwmDump || ctx.tokenBreakdown;
+          bHtml = '<pre style="font-size:10px; color:var(--warning); overflow:auto; max-height:200px;">' + JSON.stringify(payloadToDump, null, 2) + '</pre>';
+        }
+        
+        document.getElementById('ctx-breakdown-list').innerHTML = bHtml;
+        document.getElementById('ctx-breakdown').style.display = 'block';
+      } else {
+        document.getElementById('ctx-breakdown').style.display = 'none';
+      }
 
       // Stacked bar segments as % of contextLimit
       const limit = ctx.contextLimit || 1;
