@@ -36,7 +36,9 @@ const API_PROVIDER_LABELS: Record<string, string> = {
   API_PROVIDER_ANTHROPIC: 'Claude',
   API_PROVIDER_GOOGLE: 'Gemini',
   API_PROVIDER_GOOGLE_VERTEX: 'Gemini',
+  API_PROVIDER_GOOGLE_GEMINI: 'Gemini Flash',
   API_PROVIDER_OPENAI: 'GPT',
+  API_PROVIDER_OSS: 'GPT-OSS',
 };
 
 interface TrajectorySummary {

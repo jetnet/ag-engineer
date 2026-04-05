@@ -164,7 +164,7 @@ Walking backwards from the last step gives the **freshest available token counts
 - State restoration from `globalState` cache directly passes rehydrated object hierarchies into initializing singletons (like Quota Service and Context Service).
 
 ### Discovery (`platform/discovery.ts`)
-- **Linux-only**: Uses `ps -eo pid,ppid,args`, `ss -tlnp`, `lsof`. Platform-specific backends for macOS/Windows deferred to future work.
+- **Cross-platform**: Uses `ps -eo pid,ppid,args` on Linux/macOS, `wmic` on Windows for process scanning. Port listing via `ss`/`lsof` (Linux/macOS) or `netstat -ano` (Windows).
 - Scans OS processes for ALL `language_server` instances
 - Extracts `--csrf_token` and `--workspace_id` (both `--flag value` and `--flag=value` formats)
 - Logs all LS instances with workspace IDs and PPID match status
@@ -273,5 +273,4 @@ graph LR
 2. **No per-turn push**: `StreamAgentStateUpdates` only sends an initial snapshot during IDLE. Delta frames during RUNNING are not yet confirmed/implemented.
 3. **Multi-LS routing**: Addressed in v0.3.8 via workspace-based discovery sorting + concurrent live+cache owner resolution. Each poll concurrently checks both the active-window LS and the cached LS; the one with the higher `progressionIndex` wins, so model/token display updates immediately after any new message without waiting for a cache eviction timeout.
 4. **Sliding window**: Steps API returns ~1135 steps. For very long conversations, older steps fall out of the window.
-5. **Linux-only discovery**: Process discovery (`ps`, `ss`, `lsof`) only supports Linux and macOS. Windows support requires a separate backend implementation (deferred).
-6. **Best-effort workspace binding**: Two IDE windows with identical workspace paths cannot be deterministically disambiguated. Winner is selected by freshness/step heuristics.
+5. **Best-effort workspace binding**: Two IDE windows with identical workspace paths cannot be deterministically disambiguated. Winner is selected by freshness/step heuristics.

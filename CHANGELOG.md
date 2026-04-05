@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.13] — 2026-04-05
+
+### Added
+- **Windows support**: Process discovery now works on Windows using `wmic` for LS process scanning and `netstat -ano` for port listing. Line splitting uses `\r?\n` for cross-platform compatibility. (Cherry-picked from PR #1 by @mdn77)
+- **StatusBarItem ID**: Added unique string ID `ag-engineer-status` to prevent silent rendering failures on Windows in VS Code 1.85+.
+- **New API providers**: Added `API_PROVIDER_GOOGLE_GEMINI` (→ Gemini Flash) and `API_PROVIDER_OSS` (→ GPT-OSS) to provider label mapping.
+
 ## [0.3.12] — 2026-04-03
 
 ### Fixed
